@@ -500,6 +500,61 @@ def page_ebooks():
     st.title("📚 Ebooks — Libros para Kindle")
     cfg = load_config()
 
+    # ── Helpers compartidos ───────────────────────────────────────────────────
+    import urllib.request as _ureq, urllib.parse as _uparse, json as _json
+
+    TPB_API_EB = "https://apibay.org/q.php"
+    TORRENT_SOURCES_EB = [
+        "https://itorrents.org/torrent/{ih}.torrent",
+        "https://torcache.net/torrent/{ih}.torrent",
+    ]
+
+    def _eb_search(q, cat, n):
+        url = f"{TPB_API_EB}?" + _uparse.urlencode({"q": q, "cat": cat})
+        try:
+            req = _ureq.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with _ureq.urlopen(req, timeout=10) as r:
+                data = _json.loads(r.read().decode())
+            if data and data[0].get("id") == "0":
+                return []
+            return data[:n]
+        except Exception as e:
+            st.error(f"Error conectando con TPB: {e}")
+            return []
+
+    def _eb_size(b):
+        try:
+            b = int(b)
+            for u in ("B", "KB", "MB", "GB"):
+                if b < 1024: return f"{b:.0f} {u}"
+                b //= 1024
+            return f"{b:.1f} TB"
+        except: return "?"
+
+    def _eb_magnet(r):
+        ih   = r.get("info_hash", "")
+        name = _uparse.quote(r.get("name", ""))
+        tr   = ("tr=udp%3A%2F%2Ftracker.openbittorrent.com%3A6969%2Fannounce"
+                "&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce")
+        return f"magnet:?xt=urn:btih:{ih}&dn={name}&{tr}"
+
+    def _seed_badge(seeds):
+        if seeds >= 20:  return "🟢", "Buena disponibilidad — descarga rápida"
+        if seeds >= 5:   return "🟡", "Disponibilidad media — puede tardar"
+        return "🔴",            "Pocos seeders — descarga lenta o puede no completar"
+
+    def _safe_fname(name):
+        keep = set(" ._-()[]")
+        return "".join(c if (c.isalnum() or c in keep) else "_" for c in name)[:80].strip()
+
+    # Leyenda seeds (se muestra en varias pestañas)
+    SEED_LEGEND = (
+        "🟢 **≥20 seeds** — descarga rápida  ·  "
+        "🟡 **5-19 seeds** — velocidad media  ·  "
+        "🔴 **<5 seeds** — lenta o incompleta  \n"
+        "*Seeds = personas compartiendo el archivo. Más seeds = mejor descarga.*"
+    )
+
     with st.expander("⚙️ Opciones", expanded=False):
         col1, col2 = st.columns(2)
         with col1:
@@ -509,25 +564,23 @@ def page_ebooks():
                                   default=["Español 🇪🇸", "Inglés 🇬🇧"])
 
     st.markdown("---")
-    tab1, tab2 = st.tabs(["▶ Ejecutar búsqueda", "📂 Resultados anteriores"])
+    tab1, tab2, tab3 = st.tabs(["▶ Ejecutar búsqueda", "🔎 Buscar libro", "📂 Resultados anteriores"])
 
+    # ── Tab 1: búsqueda automática ────────────────────────────────────────────
     with tab1:
         st.markdown(
             "Busca los libros más leídos en **Open Library** más una lista curada "
             "de clásicos, premios Nobel/Booker/Pulitzer y bestsellers. "
             "Descarga `.torrent` en formato **EPUB / MOBI / AZW3** para Kindle."
         )
-
         if st.button("🚀 Iniciar búsqueda", type="primary", use_container_width=True):
             cfg["top_books"] = top_books
             save_config(cfg)
-
             script = BASE_DIR / "scripts" / "ebooks_export.py"
             import re
             code = script.read_text()
             code = re.sub(r'TOP_BOOKS_TPB\s*=\s*\d+', f'TOP_BOOKS_TPB = {top_books}', code)
             script.write_text(code)
-
             status = st.empty()
             log    = st.empty()
             status.info("⏳ Ejecutando — puede tardar varios minutos...")
@@ -537,37 +590,168 @@ def page_ebooks():
             else:
                 status.error("❌ El script terminó con errores")
 
+    # ── Tab 2: búsqueda directa ───────────────────────────────────────────────
     with tab2:
+        st.markdown("Busca cualquier libro, autor o colección directamente en **The Pirate Bay**.")
+
+        st.caption(SEED_LEGEND)
+        st.markdown("---")
+
+        col_q, col_cat = st.columns([3, 1])
+        with col_q:
+            query_eb = st.text_input(
+                "📖 Título, autor o colección",
+                placeholder="ej: Gabriel García Márquez, Harry Potter, Stephen King epub...",
+                key="eb_query",
+            )
+        with col_cat:
+            cat_eb = st.selectbox(
+                "Categoría",
+                ["Ebooks (601)", "Todas"],
+                key="eb_cat",
+                help="601 = categoría oficial de ebooks en TPB",
+            )
+
+        cat_map_eb = {"Ebooks (601)": 601, "Todas": 0}
+        n_eb = st.slider("Número de resultados", 3, 20, 8, key="eb_n")
+
+        buscar_eb = st.button("🔍 Buscar", type="primary",
+                              use_container_width=True, disabled=not query_eb)
+
+        if buscar_eb and query_eb:
+            torrents_dir_eb = BASE_DIR / "output_ebooks" / "torrents"
+            torrents_dir_eb.mkdir(parents=True, exist_ok=True)
+
+            with st.spinner(f"Buscando «{query_eb}» en The Pirate Bay..."):
+                res_eb = _eb_search(query_eb, cat_map_eb[cat_eb], n_eb)
+
+            if not res_eb:
+                st.warning("Sin resultados. Prueba con otro título, autor o en categoría **Todas**.")
+            else:
+                st.success(f"✅ {len(res_eb)} resultados para **{query_eb}**")
+
+                for i, r in enumerate(res_eb):
+                    name    = r.get("name", "")
+                    seeds   = int(r.get("seeders", 0))
+                    leeches = int(r.get("leechers", 0))
+                    size    = _eb_size(r.get("size", 0))
+                    ih      = r.get("info_hash", "")
+                    mag     = _eb_magnet(r)
+                    emoji, tip = _seed_badge(seeds)
+
+                    fname = _safe_fname(name) + ".torrent"
+                    dest  = torrents_dir_eb / fname
+                    ya_dl = dest.exists()
+
+                    with st.container(border=True):
+                        col_info, col_meta, col_btns = st.columns([4, 2, 2])
+
+                        with col_info:
+                            prefix = "✅ " if ya_dl else ""
+                            st.markdown(f"**{prefix}{name[:80]}**")
+                            if ya_dl:
+                                st.caption("💾 Ya descargado")
+
+                        with col_meta:
+                            st.caption(
+                                f"{emoji} {seeds} seeds · {leeches} leechers",
+                                help=f"{tip}\n\n*Leechers = personas descargando ahora*",
+                            )
+                            st.caption(f"📦 {size}")
+
+                        with col_btns:
+                            col_dl, col_mag = st.columns(2)
+                            with col_dl:
+                                if ya_dl:
+                                    with open(dest, "rb") as fh:
+                                        st.download_button(
+                                            "⬇ .torrent", fh.read(), fname,
+                                            key=f"eb_dl_{i}", use_container_width=True,
+                                            help="Ya descargado — clic para guardar en tu equipo",
+                                        )
+                                else:
+                                    if st.button("⬇ Guardar", key=f"eb_save_{i}",
+                                                 use_container_width=True,
+                                                 help="Descarga el fichero .torrent a output_ebooks/torrents/"):
+                                        try:
+                                            saved = False
+                                            for tpl in TORRENT_SOURCES_EB:
+                                                try:
+                                                    req = _ureq.Request(
+                                                        tpl.format(ih=ih.upper()),
+                                                        headers={"User-Agent": "Mozilla/5.0"})
+                                                    with _ureq.urlopen(req, timeout=10) as resp:
+                                                        data = resp.read()
+                                                    if data and data[0:1] == b'd':
+                                                        dest.write_bytes(data)
+                                                        saved = True
+                                                        break
+                                                except: continue
+                                            if saved:
+                                                st.success("✅ Guardado en output_ebooks/torrents/")
+                                            else:
+                                                st.error("No disponible en servidores de caché — usa el magnet")
+                                        except Exception as ex:
+                                            st.error(f"Error: {ex}")
+                            with col_mag:
+                                st.link_button(
+                                    "🧲 Magnet", mag,
+                                    use_container_width=True,
+                                    help="Abre directamente en uTorrent sin guardar ningún fichero",
+                                )
+
+    # ── Tab 3: resultados anteriores ──────────────────────────────────────────
+    with tab3:
         out  = BASE_DIR / "output_ebooks"
         torr = out / "torrents"
 
+        # Métricas
+        torrents_list = sorted(torr.glob("*.torrent")) if torr.exists() else []
         col1, col2, col3 = st.columns(3)
         with col1:
-            count = len(list(torr.glob("*.torrent"))) if torr.exists() else 0
-            st.metric("Torrents generados", count)
+            st.metric("📥 Torrents descargados", len(torrents_list))
         with col2:
-            mag = out / "magnets_ebooks.txt"
-            if mag.exists():
-                lines = [l for l in mag.read_text().splitlines() if l.startswith("magnet:")]
-                st.metric("Magnet links", len(lines))
+            mag_f = out / "magnets_ebooks.txt"
+            if mag_f.exists():
+                n_mag = sum(1 for l in mag_f.read_text().splitlines() if l.startswith("magnet:"))
+                st.metric("🧲 Magnet links", n_mag)
         with col3:
-            html = out / "utorrent_ebooks.html"
-            st.metric("Vista HTML", "✓" if html.exists() else "—")
+            html_f = out / "utorrent_ebooks.html"
+            st.metric("📄 Vista HTML", "✓ Disponible" if html_f.exists() else "—")
 
-        if torr.exists() and list(torr.glob("*.torrent")):
-            st.markdown("#### 📖 Ficheros .torrent (para uTorrent)")
-            en_t = [t for t in sorted(torr.glob("*.torrent"))]
-            for t in en_t[:20]:
-                col_a, col_b = st.columns([3, 1])
+        st.markdown("---")
+
+        if not torrents_list:
+            st.info("Aún no hay ebooks descargados. Ejecuta la búsqueda automática o busca uno en **🔎 Buscar libro**.")
+        else:
+            # Leyenda seeds
+            st.caption(SEED_LEGEND)
+            st.markdown("---")
+
+            # Buscador
+            filtro = st.text_input("🔎 Filtrar por título", placeholder="ej: márquez, tolkien, epub...",
+                                   key="eb_filtro")
+            mostrados = [t for t in torrents_list
+                         if not filtro or filtro.lower() in t.stem.lower()]
+
+            st.caption(f"Mostrando {len(mostrados)} de {len(torrents_list)} torrents descargados")
+
+            for t in mostrados[:100]:
+                col_a, col_b = st.columns([5, 1])
                 with col_a:
-                    st.caption(t.stem[:60])
+                    st.markdown(f"✅ **{t.stem[:75]}**")
                 with col_b:
                     with open(t, "rb") as fh:
-                        st.download_button("⬇", fh.read(), t.name, key=f"e_{t.name}")
-            if len(en_t) > 20:
-                st.caption(f"... y {len(en_t)-20} más")
+                        st.download_button(
+                            "⬇", fh.read(), t.name,
+                            key=f"eb_prev_{t.name}",
+                            help="Descargar este .torrent a tu equipo para importar en uTorrent",
+                        )
+            if len(mostrados) > 100:
+                st.caption(f"... y {len(mostrados)-100} más (usa el filtro para buscar)")
 
         if (out / "utorrent_ebooks.html").exists():
+            st.markdown("---")
             st.markdown("#### 📄 Archivos de reporte")
             output_files_section(out, extensions=[".txt", ".html"])
 
