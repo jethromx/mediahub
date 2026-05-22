@@ -106,69 +106,138 @@ def output_files_section(folder, extensions=None):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def page_inicio():
-    st.title("🎵 MediaHub")
-    st.markdown("Descarga música y ebooks, y mantén tus metadatos siempre actualizados.")
+    cfg = load_config()
 
-    st.divider()
+    # ── Hero ─────────────────────────────────────────────────────────────────
+    st.markdown("""
+    <div class="mh-hero">
+        <div style="font-size:2.6rem;font-weight:900;background:linear-gradient(135deg,#a78bfa,#60a5fa,#34d399);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;margin-bottom:8px;">
+            🎵 MediaHub
+        </div>
+        <div style="color:#8888b0;font-size:1.05rem;max-width:560px;line-height:1.7;">
+            Tu biblioteca de música y ebooks, <strong style="color:#c4b5fd;">completamente local</strong> y sin suscripciones.
+            Descarga, organiza y exporta — todo desde tu máquina.
+        </div>
+        <div style="margin-top:18px;display:flex;gap:10px;flex-wrap:wrap;">
+            <span class="mh-badge mh-badge-purple">🔒 100% Local</span>
+            <span class="mh-badge mh-badge-blue">🎵 Last.fm + TPB</span>
+            <span class="mh-badge mh-badge-green">📱 Sin duplicados</span>
+            <span class="mh-badge mh-badge-yellow">🔧 Fix Metadata</span>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
+    # ── Métricas rápidas ──────────────────────────────────────────────────────
+    music_count = len(list(Path(cfg["music_folder"]).rglob("*.mp3"))) if Path(cfg["music_folder"]).exists() else 0
+    t_music  = BASE_DIR / "output" / "torrents"
+    t_ebooks = BASE_DIR / "output_ebooks" / "torrents"
+    n_torrents_music  = len(list(t_music.glob("*.torrent")))  if t_music.exists()  else 0
+    n_torrents_ebooks = len(list(t_ebooks.glob("*.torrent"))) if t_ebooks.exists() else 0
+
+    col_a, col_b, col_c = st.columns(3)
+    with col_a:
+        st.metric("🎵 MP3s en biblioteca", f"{music_count:,}")
+    with col_b:
+        st.metric("🎵 Torrents música", n_torrents_music)
+    with col_c:
+        st.metric("📚 Torrents ebooks", n_torrents_ebooks)
+
+    st.markdown('<div class="mh-section-title">Módulos disponibles</div>', unsafe_allow_html=True)
+
+    # ── Tarjetas de módulos ───────────────────────────────────────────────────
     col1, col2, col3 = st.columns(3)
+
     with col1:
-        st.markdown("### 🎵 Música")
-        st.markdown(
-            "Obtiene el top de canciones de **Last.fm** por género "
-            "y busca sus torrents MP3 en The Pirate Bay."
-        )
-        if st.button("Ir a Música", use_container_width=True):
+        st.markdown("""
+        <div class="mh-card">
+            <span class="mh-card-icon">🎵</span>
+            <div class="mh-card-title">Música</div>
+            <div class="mh-card-desc">
+                Obtiene el top de canciones de <strong>Last.fm</strong> por género
+                y descarga torrents MP3 desde The Pirate Bay.
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("Ir a Música →", use_container_width=True, key="home_musica"):
             st.session_state.page = "🎵 Música"
             st.rerun()
 
     with col2:
-        st.markdown("### 📚 Ebooks")
-        st.markdown(
-            "Lista los libros más leídos en inglés y español "
-            "y descarga ficheros .torrent para Kindle."
-        )
-        if st.button("Ir a Ebooks", use_container_width=True):
+        st.markdown("""
+        <div class="mh-card">
+            <span class="mh-card-icon">📚</span>
+            <div class="mh-card-title">Ebooks</div>
+            <div class="mh-card-desc">
+                Lista los libros más leídos en inglés y español
+                y descarga ficheros <strong>.torrent</strong> para Kindle.
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("Ir a Ebooks →", use_container_width=True, key="home_ebooks"):
             st.session_state.page = "📚 Ebooks"
             st.rerun()
 
     with col3:
-        st.markdown("### 🔧 Fix Metadata")
-        st.markdown(
-            "Analiza tus MP3s, completa los tags que faltan "
-            "y descarga la portada de cada canción."
-        )
-        if st.button("Ir a Fix Metadata", use_container_width=True):
+        st.markdown("""
+        <div class="mh-card">
+            <span class="mh-card-icon">🟢</span>
+            <div class="mh-card-title">Mi Spotify</div>
+            <div class="mh-card-desc">
+                Procesa tu historial personal de Spotify y busca
+                los torrents de tus artistas más escuchados.
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("Ir a Mi Spotify →", use_container_width=True, key="home_spotify"):
+            st.session_state.page = "🟢 Mi Spotify"
+            st.rerun()
+
+    col4, col5, col6 = st.columns(3)
+
+    with col4:
+        st.markdown("""
+        <div class="mh-card">
+            <span class="mh-card-icon">🔧</span>
+            <div class="mh-card-title">Fix Metadata</div>
+            <div class="mh-card-desc">
+                Completa los tags ID3 de tus MP3s — artista, álbum,
+                año, género y portada — automáticamente.
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("Ir a Fix Metadata →", use_container_width=True, key="home_meta"):
             st.session_state.page = "🔧 Fix Metadata"
             st.rerun()
 
-    st.divider()
-
-    col4, col5, _ = st.columns(3)
-    with col4:
-        st.markdown("### 📱 Exportar al Móvil")
-        st.markdown(
-            "Genera una copia de toda tu música **sin canciones repetidas**, "
-            "lista para transferir al celular."
-        )
-        if st.button("Ir a Exportar al Móvil", use_container_width=True):
+    with col5:
+        st.markdown("""
+        <div class="mh-card">
+            <span class="mh-card-icon">📱</span>
+            <div class="mh-card-title">Exportar al Móvil</div>
+            <div class="mh-card-desc">
+                Genera una copia de tu música <strong>sin repetidos</strong>,
+                con prioridad por escuchas de Spotify y límite de tamaño.
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("Ir a Exportar →", use_container_width=True, key="home_phone"):
             st.session_state.page = "📱 Exportar al Móvil"
             st.rerun()
 
-    st.divider()
-
-    # Estado rápido
-    cfg = load_config()
-    col_a, col_b, col_c = st.columns(3)
-    with col_a:
-        music_count = len(list(Path(cfg["music_folder"]).rglob("*.mp3"))) if Path(cfg["music_folder"]).exists() else 0
-        st.metric("MP3s en tu biblioteca", music_count)
-    with col_b:
-        t_music = BASE_DIR / "output" / "torrents"
-        st.metric("Torrents de música", len(list(t_music.glob("*.torrent"))) if t_music.exists() else 0)
-    with col_c:
-        t_ebooks = BASE_DIR / "output_ebooks" / "torrents"
-        st.metric("Torrents de ebooks", len(list(t_ebooks.glob("*.torrent"))) if t_ebooks.exists() else 0)
+    with col6:
+        st.markdown("""
+        <div class="mh-card">
+            <span class="mh-card-icon">⚙️</span>
+            <div class="mh-card-title">Configuración</div>
+            <div class="mh-card-desc">
+                API keys, carpetas de música / ebooks / móvil,
+                géneros activos y preferencias que persisten entre sesiones.
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("Ir a Config →", use_container_width=True, key="home_cfg"):
+            st.session_state.page = "⚙️ Configuración"
+            st.rerun()
 
 
 def page_musica():
@@ -1559,13 +1628,338 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# CSS extra
+# ── CSS — Dark Music Theme ────────────────────────────────────────────────────
 st.markdown("""
 <style>
-    [data-testid="stSidebar"] { background-color: #1a1a2e; }
-    [data-testid="stSidebar"] * { color: #eee !important; }
-    .stButton > button { border-radius: 8px; }
-    .stMetric { background: #0f0f23; border-radius: 8px; padding: 12px; }
+/* ═══════════════════════════════════════════════
+   BASE & BACKGROUND
+═══════════════════════════════════════════════ */
+html, body, [data-testid="stAppViewContainer"] {
+    background: #0d0d1a !important;
+    color: #e2e2f0 !important;
+}
+[data-testid="stMain"] {
+    background: transparent !important;
+}
+
+/* ═══════════════════════════════════════════════
+   SIDEBAR
+═══════════════════════════════════════════════ */
+[data-testid="stSidebar"] {
+    background: linear-gradient(180deg, #12122a 0%, #0d0d1a 100%) !important;
+    border-right: 1px solid rgba(120,80,255,0.18) !important;
+}
+[data-testid="stSidebar"] * { color: #d0d0f0 !important; }
+
+/* Nav buttons — base */
+[data-testid="stSidebar"] .stButton > button {
+    background: rgba(255,255,255,0.04) !important;
+    border: 1px solid rgba(120,80,255,0.15) !important;
+    border-radius: 10px !important;
+    color: #c5c5e8 !important;
+    font-weight: 500 !important;
+    font-size: 0.88rem !important;
+    padding: 8px 12px !important;
+    transition: all 0.2s ease !important;
+    text-align: left !important;
+}
+[data-testid="stSidebar"] .stButton > button:hover {
+    background: rgba(120,80,255,0.18) !important;
+    border-color: rgba(120,80,255,0.5) !important;
+    color: #fff !important;
+    transform: translateX(3px) !important;
+}
+/* Active nav button (primary type) */
+[data-testid="stSidebar"] .stButton > button[kind="primary"] {
+    background: linear-gradient(135deg, #7050ff 0%, #a855f7 100%) !important;
+    border-color: transparent !important;
+    color: #fff !important;
+    box-shadow: 0 4px 15px rgba(120,80,255,0.4) !important;
+}
+
+/* ═══════════════════════════════════════════════
+   TYPOGRAPHY
+═══════════════════════════════════════════════ */
+h1 {
+    background: linear-gradient(135deg, #a78bfa, #60a5fa, #34d399);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    font-weight: 800 !important;
+    letter-spacing: -0.5px;
+}
+h2, h3 { color: #c4b5fd !important; font-weight: 700 !important; }
+h4, h5 { color: #a5b4fc !important; }
+p, .stMarkdown p { color: #b8b8d4 !important; line-height: 1.7 !important; }
+
+/* ═══════════════════════════════════════════════
+   BUTTONS
+═══════════════════════════════════════════════ */
+.stButton > button {
+    border-radius: 10px !important;
+    font-weight: 600 !important;
+    font-size: 0.88rem !important;
+    transition: all 0.2s ease !important;
+    border: 1px solid rgba(120,80,255,0.3) !important;
+    background: rgba(120,80,255,0.1) !important;
+    color: #c4b5fd !important;
+}
+.stButton > button:hover {
+    background: rgba(120,80,255,0.25) !important;
+    border-color: rgba(120,80,255,0.6) !important;
+    color: #fff !important;
+    box-shadow: 0 4px 12px rgba(120,80,255,0.3) !important;
+    transform: translateY(-1px) !important;
+}
+.stButton > button[kind="primary"] {
+    background: linear-gradient(135deg, #7050ff 0%, #a855f7 100%) !important;
+    border-color: transparent !important;
+    color: #fff !important;
+    box-shadow: 0 4px 20px rgba(120,80,255,0.45) !important;
+}
+.stButton > button[kind="primary"]:hover {
+    box-shadow: 0 6px 25px rgba(120,80,255,0.65) !important;
+    transform: translateY(-2px) !important;
+    filter: brightness(1.1) !important;
+}
+
+/* ═══════════════════════════════════════════════
+   METRICS
+═══════════════════════════════════════════════ */
+[data-testid="stMetric"] {
+    background: linear-gradient(135deg, rgba(120,80,255,0.12) 0%, rgba(168,85,247,0.08) 100%) !important;
+    border: 1px solid rgba(120,80,255,0.25) !important;
+    border-radius: 14px !important;
+    padding: 16px !important;
+    backdrop-filter: blur(8px) !important;
+}
+[data-testid="stMetricValue"] {
+    color: #c4b5fd !important;
+    font-size: 2rem !important;
+    font-weight: 800 !important;
+}
+[data-testid="stMetricLabel"] { color: #8888b0 !important; font-size: 0.8rem !important; }
+
+/* ═══════════════════════════════════════════════
+   TABS
+═══════════════════════════════════════════════ */
+[data-testid="stTabs"] [data-baseweb="tab-list"] {
+    background: rgba(255,255,255,0.03) !important;
+    border-radius: 12px !important;
+    padding: 4px !important;
+    border: 1px solid rgba(120,80,255,0.15) !important;
+    gap: 2px !important;
+}
+[data-testid="stTabs"] [data-baseweb="tab"] {
+    border-radius: 9px !important;
+    color: #8888b0 !important;
+    font-weight: 500 !important;
+    font-size: 0.87rem !important;
+    padding: 8px 16px !important;
+    border: none !important;
+    background: transparent !important;
+}
+[data-testid="stTabs"] [aria-selected="true"] {
+    background: linear-gradient(135deg, #7050ff, #a855f7) !important;
+    color: #fff !important;
+    box-shadow: 0 2px 10px rgba(120,80,255,0.4) !important;
+}
+
+/* ═══════════════════════════════════════════════
+   INPUTS & SELECTS
+═══════════════════════════════════════════════ */
+.stTextInput > div > div > input,
+.stNumberInput > div > div > input,
+.stSelectbox > div > div,
+.stMultiSelect > div > div {
+    background: rgba(255,255,255,0.04) !important;
+    border: 1px solid rgba(120,80,255,0.25) !important;
+    border-radius: 10px !important;
+    color: #e2e2f0 !important;
+}
+.stTextInput > div > div > input:focus,
+.stNumberInput > div > div > input:focus {
+    border-color: rgba(120,80,255,0.7) !important;
+    box-shadow: 0 0 0 3px rgba(120,80,255,0.15) !important;
+}
+.stSlider [data-baseweb="slider"] { color: #7050ff !important; }
+.stSlider [data-baseweb="thumb"] { background: #7050ff !important; }
+
+/* ═══════════════════════════════════════════════
+   CONTAINERS / CARDS
+═══════════════════════════════════════════════ */
+[data-testid="stContainer"] {
+    border-radius: 14px !important;
+}
+div[data-testid="stVerticalBlock"] > div:has(> [data-testid="stContainer"][style*="border"]) {
+    background: rgba(120,80,255,0.06) !important;
+    border-radius: 14px !important;
+}
+
+/* ═══════════════════════════════════════════════
+   EXPANDERS
+═══════════════════════════════════════════════ */
+[data-testid="stExpander"] {
+    background: rgba(255,255,255,0.03) !important;
+    border: 1px solid rgba(120,80,255,0.2) !important;
+    border-radius: 12px !important;
+    margin-bottom: 8px !important;
+}
+[data-testid="stExpander"]:hover {
+    border-color: rgba(120,80,255,0.4) !important;
+}
+[data-testid="stExpanderToggleIcon"] { color: #7050ff !important; }
+
+/* ═══════════════════════════════════════════════
+   CODE BLOCKS / LOGS
+═══════════════════════════════════════════════ */
+.stCode, pre, code {
+    background: rgba(0,0,0,0.4) !important;
+    border: 1px solid rgba(120,80,255,0.2) !important;
+    border-radius: 10px !important;
+    color: #a8d8a8 !important;
+    font-size: 0.8rem !important;
+}
+
+/* ═══════════════════════════════════════════════
+   ALERTS & STATUS
+═══════════════════════════════════════════════ */
+[data-testid="stAlert"][data-baseweb="notification"][kind="info"] {
+    background: rgba(96,165,250,0.1) !important;
+    border: 1px solid rgba(96,165,250,0.3) !important;
+    border-radius: 10px !important;
+    color: #93c5fd !important;
+}
+[data-testid="stAlert"][kind="success"],
+div[class*="stSuccess"] {
+    background: rgba(52,211,153,0.1) !important;
+    border: 1px solid rgba(52,211,153,0.3) !important;
+    border-radius: 10px !important;
+}
+[data-testid="stAlert"][kind="error"],
+div[class*="stError"] {
+    background: rgba(248,113,113,0.1) !important;
+    border: 1px solid rgba(248,113,113,0.3) !important;
+    border-radius: 10px !important;
+}
+[data-testid="stAlert"][kind="warning"],
+div[class*="stWarning"] {
+    background: rgba(251,191,36,0.1) !important;
+    border: 1px solid rgba(251,191,36,0.3) !important;
+    border-radius: 10px !important;
+}
+
+/* ═══════════════════════════════════════════════
+   DIVIDERS
+═══════════════════════════════════════════════ */
+hr {
+    border: none !important;
+    border-top: 1px solid rgba(120,80,255,0.2) !important;
+    margin: 20px 0 !important;
+}
+
+/* ═══════════════════════════════════════════════
+   CAPTIONS & LABELS
+═══════════════════════════════════════════════ */
+.stCaption, small, [data-testid="stCaption"] {
+    color: #6666a0 !important;
+    font-size: 0.78rem !important;
+}
+
+/* ═══════════════════════════════════════════════
+   DOWNLOAD BUTTONS
+═══════════════════════════════════════════════ */
+[data-testid="stDownloadButton"] > button {
+    background: rgba(52,211,153,0.12) !important;
+    border: 1px solid rgba(52,211,153,0.3) !important;
+    color: #6ee7b7 !important;
+    border-radius: 10px !important;
+}
+[data-testid="stDownloadButton"] > button:hover {
+    background: rgba(52,211,153,0.25) !important;
+    box-shadow: 0 4px 12px rgba(52,211,153,0.25) !important;
+    transform: translateY(-1px) !important;
+}
+
+/* ═══════════════════════════════════════════════
+   MULTISELECT TAGS
+═══════════════════════════════════════════════ */
+[data-baseweb="tag"] {
+    background: linear-gradient(135deg, rgba(120,80,255,0.4), rgba(168,85,247,0.4)) !important;
+    border-radius: 6px !important;
+    color: #e2e2f0 !important;
+}
+
+/* ═══════════════════════════════════════════════
+   CUSTOM HELPER CLASSES (via st.markdown)
+═══════════════════════════════════════════════ */
+.mh-card {
+    background: linear-gradient(135deg, rgba(120,80,255,0.1) 0%, rgba(168,85,247,0.07) 100%);
+    border: 1px solid rgba(120,80,255,0.25);
+    border-radius: 16px;
+    padding: 24px 20px;
+    margin-bottom: 12px;
+    transition: all 0.25s ease;
+}
+.mh-card:hover {
+    border-color: rgba(120,80,255,0.55);
+    background: linear-gradient(135deg, rgba(120,80,255,0.18) 0%, rgba(168,85,247,0.12) 100%);
+    box-shadow: 0 8px 32px rgba(120,80,255,0.2);
+    transform: translateY(-2px);
+}
+.mh-card-icon { font-size: 2.2rem; margin-bottom: 12px; display: block; }
+.mh-card-title { color: #c4b5fd; font-size: 1.15rem; font-weight: 700; margin-bottom: 6px; }
+.mh-card-desc { color: #8888b0; font-size: 0.88rem; line-height: 1.6; }
+.mh-badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 20px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+}
+.mh-badge-green  { background: rgba(52,211,153,0.15); color: #6ee7b7; border: 1px solid rgba(52,211,153,0.3); }
+.mh-badge-yellow { background: rgba(251,191,36,0.15);  color: #fcd34d; border: 1px solid rgba(251,191,36,0.3); }
+.mh-badge-red    { background: rgba(248,113,113,0.15); color: #fca5a5; border: 1px solid rgba(248,113,113,0.3); }
+.mh-badge-blue   { background: rgba(96,165,250,0.15);  color: #93c5fd; border: 1px solid rgba(96,165,250,0.3); }
+.mh-badge-purple { background: rgba(120,80,255,0.15);  color: #c4b5fd; border: 1px solid rgba(120,80,255,0.3); }
+.mh-stat-row { display: flex; gap: 12px; flex-wrap: wrap; margin: 12px 0; }
+.mh-stat {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(120,80,255,0.2);
+    border-radius: 10px;
+    padding: 10px 18px;
+    text-align: center;
+    min-width: 100px;
+}
+.mh-stat-val { font-size: 1.4rem; font-weight: 800; color: #c4b5fd; }
+.mh-stat-lbl { font-size: 0.72rem; color: #6666a0; margin-top: 2px; }
+.mh-hero {
+    background: linear-gradient(135deg, rgba(120,80,255,0.15) 0%, rgba(59,130,246,0.1) 50%, rgba(52,211,153,0.08) 100%);
+    border: 1px solid rgba(120,80,255,0.2);
+    border-radius: 20px;
+    padding: 32px;
+    margin-bottom: 28px;
+    position: relative;
+    overflow: hidden;
+}
+.mh-hero::before {
+    content: "";
+    position: absolute;
+    top: -60px; right: -60px;
+    width: 200px; height: 200px;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(120,80,255,0.15), transparent 70%);
+    pointer-events: none;
+}
+.mh-section-title {
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: #5555a0;
+    margin: 24px 0 12px;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -1574,16 +1968,38 @@ if "page" not in st.session_state:
     st.session_state.page = "🏠 Inicio"
 
 with st.sidebar:
-    st.markdown("## 🎵 MediaHub")
-    st.markdown("---")
-    pages = ["🏠 Inicio", "🎵 Música", "📚 Ebooks", "🟢 Mi Spotify", "🔧 Fix Metadata", "📱 Exportar al Móvil", "⚙️ Configuración", "📖 Ayuda"]
-    for p in pages:
+    st.markdown("""
+    <div style="padding:16px 8px 4px;margin-bottom:4px;">
+        <div style="font-size:1.55rem;font-weight:900;background:linear-gradient(135deg,#a78bfa,#60a5fa);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;">
+            🎵 MediaHub
+        </div>
+        <div style="font-size:0.72rem;color:#44448a;letter-spacing:0.5px;margin-top:2px;">
+            Tu música · Local · Sin suscripciones
+        </div>
+    </div>
+    <div style="height:1px;background:linear-gradient(90deg,rgba(120,80,255,0.4),transparent);margin:8px 0 16px;"></div>
+    """, unsafe_allow_html=True)
+
+    pages = [
+        ("🏠 Inicio",           "🏠"),
+        ("🎵 Música",           "🎵"),
+        ("📚 Ebooks",           "📚"),
+        ("🟢 Mi Spotify",       "🟢"),
+        ("🔧 Fix Metadata",     "🔧"),
+        ("📱 Exportar al Móvil","📱"),
+        ("⚙️ Configuración",    "⚙️"),
+        ("📖 Ayuda",            "📖"),
+    ]
+    for p, _ in pages:
         if st.button(p, use_container_width=True, key=f"nav_{p}",
                      type="primary" if st.session_state.page == p else "secondary"):
             st.session_state.page = p
             st.rerun()
-    st.markdown("---")
-    st.caption("v1.0 — MediaHub")
+
+    st.markdown("""
+    <div style="height:1px;background:linear-gradient(90deg,rgba(120,80,255,0.4),transparent);margin:16px 0 12px;"></div>
+    <div style="font-size:0.7rem;color:#33335a;text-align:center;">v1.0 · MediaHub · MIT</div>
+    """, unsafe_allow_html=True)
 
 # Renderiza la página activa
 {
