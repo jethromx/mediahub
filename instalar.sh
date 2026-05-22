@@ -301,7 +301,7 @@ if [[ ! -f "$STREAMLIT_DIR/credentials.toml" ]]; then
     printf '[general]\nemail = ""\n' > "$STREAMLIT_DIR/credentials.toml"
 fi
 if [[ ! -f "$STREAMLIT_DIR/config.toml" ]]; then
-    printf '[browser]\ngatherUsageStats = false\n' > "$STREAMLIT_DIR/config.toml"
+    printf '[browser]\ngatherUsageStats = false\n\n[client]\ntoolbarMode = "minimal"\n' > "$STREAMLIT_DIR/config.toml"
 fi
 
 ok "Streamlit configurado (sin prompts de email)"
