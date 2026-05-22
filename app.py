@@ -189,7 +189,7 @@ def page_musica():
 
     st.markdown("---")
 
-    tab1, tab2 = st.tabs(["▶ Ejecutar búsqueda", "📂 Resultados anteriores"])
+    tab1, tab2, tab3 = st.tabs(["▶ Ejecutar búsqueda", "🔎 Buscar artista / canción", "📂 Resultados anteriores"])
 
     with tab1:
         st.markdown(
@@ -227,7 +227,140 @@ def page_musica():
             else:
                 status.error("❌ El script terminó con errores")
 
+    # ── Tab 2: Búsqueda directa en TPB ───────────────────────────────────────
     with tab2:
+        st.markdown("Busca cualquier artista o canción directamente en **The Pirate Bay** y descarga el `.torrent`.")
+
+        col_q, col_cat = st.columns([3, 1])
+        with col_q:
+            query = st.text_input("🔎 Artista, canción o álbum",
+                                  placeholder="ej: Metallica, Bohemian Rhapsody, The Wall...",
+                                  key="tpb_query")
+        with col_cat:
+            categoria = st.selectbox("Categoría", ["MP3", "Música (todo)", "Todas"], key="tpb_cat")
+
+        cat_map = {"MP3": 101, "Música (todo)": 100, "Todas": 0}
+        n_resultados = st.slider("Número de resultados", 3, 20, 8, key="tpb_n")
+
+        buscar = st.button("🔍 Buscar en The Pirate Bay", type="primary",
+                           use_container_width=True, disabled=not query)
+
+        if buscar and query:
+            import urllib.request, urllib.parse, json as _json
+
+            TPB_API = "https://apibay.org/q.php"
+            TORRENT_SOURCES = [
+                "https://itorrents.org/torrent/{ih}.torrent",
+                "https://torcache.net/torrent/{ih}.torrent",
+            ]
+
+            def _tpb_search(q, cat, n):
+                url = f"{TPB_API}?" + urllib.parse.urlencode({"q": q, "cat": cat})
+                try:
+                    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                    with urllib.request.urlopen(req, timeout=10) as r:
+                        data = _json.loads(r.read().decode())
+                    if data and data[0].get("id") == "0":
+                        return []
+                    return data[:n]
+                except Exception as e:
+                    st.error(f"Error conectando con TPB: {e}")
+                    return []
+
+            def _size_human(b):
+                try:
+                    b = int(b)
+                    for u in ("B","KB","MB","GB"):
+                        if b < 1024: return f"{b:.0f} {u}"
+                        b //= 1024
+                    return f"{b:.1f} TB"
+                except: return "?"
+
+            def _magnet(r):
+                ih   = r.get("info_hash","")
+                name = urllib.parse.quote(r.get("name",""))
+                tr   = ("tr=udp%3A%2F%2Ftracker.openbittorrent.com%3A6969%2Fannounce"
+                        "&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce")
+                return f"magnet:?xt=urn:btih:{ih}&dn={name}&{tr}"
+
+            with st.spinner(f"Buscando «{query}» en The Pirate Bay..."):
+                resultados = _tpb_search(query, cat_map[categoria], n_resultados)
+
+            if not resultados:
+                st.warning("Sin resultados. Prueba con otra búsqueda o categoría.")
+            else:
+                st.success(f"✅ {len(resultados)} resultados para **{query}**")
+
+                torrents_dir = BASE_DIR / "output" / "torrents"
+                torrents_dir.mkdir(parents=True, exist_ok=True)
+
+                for i, r in enumerate(resultados):
+                    name  = r.get("name","")
+                    seeds = int(r.get("seeders", 0))
+                    leeches = int(r.get("leechers", 0))
+                    size  = _size_human(r.get("size", 0))
+                    ih    = r.get("info_hash","")
+                    mag   = _magnet(r)
+
+                    # Color según seeds
+                    if seeds >= 20:   seed_color = "🟢"
+                    elif seeds >= 5:  seed_color = "🟡"
+                    else:             seed_color = "🔴"
+
+                    with st.container(border=True):
+                        col_info, col_meta, col_btns = st.columns([4, 2, 2])
+
+                        with col_info:
+                            st.markdown(f"**{name[:80]}**")
+
+                        with col_meta:
+                            st.caption(f"{seed_color} {seeds} seeds · {leeches} leechers")
+                            st.caption(f"💾 {size}")
+
+                        with col_btns:
+                            # Botón descargar .torrent
+                            keep  = set(" ._-()[]")
+                            fname = "".join(c if (c.isalnum() or c in keep) else "_" for c in name)[:80].strip() + ".torrent"
+                            dest  = torrents_dir / fname
+
+                            col_dl, col_mag = st.columns(2)
+                            with col_dl:
+                                if dest.exists():
+                                    with open(dest, "rb") as fh:
+                                        st.download_button("⬇ .torrent", fh.read(), fname,
+                                                           key=f"dl_s_{i}", use_container_width=True,
+                                                           help="Ya descargado — clic para guardar")
+                                else:
+                                    if st.button("⬇ Guardar", key=f"save_{i}",
+                                                 use_container_width=True, help="Descargar .torrent"):
+                                        try:
+                                            ih_up = ih.upper()
+                                            saved = False
+                                            for tpl in TORRENT_SOURCES:
+                                                try:
+                                                    req = urllib.request.Request(
+                                                        tpl.format(ih=ih_up),
+                                                        headers={"User-Agent": "Mozilla/5.0"})
+                                                    with urllib.request.urlopen(req, timeout=10) as resp:
+                                                        data = resp.read()
+                                                    if data and data[0:1] == b'd':
+                                                        dest.write_bytes(data)
+                                                        saved = True
+                                                        break
+                                                except: continue
+                                            if saved:
+                                                st.success("✅ Guardado")
+                                            else:
+                                                st.error("Sin servidor disponible")
+                                        except Exception as ex:
+                                            st.error(f"Error: {ex}")
+                            with col_mag:
+                                st.link_button("🧲 Magnet", mag,
+                                               use_container_width=True,
+                                               help="Abrir magnet link en uTorrent")
+
+    # ── Tab 3: Resultados anteriores ─────────────────────────────────────────
+    with tab3:
         out  = BASE_DIR / "output"
         torr = out / "torrents"
         log_path = out / "lastfm_search_log.json"
