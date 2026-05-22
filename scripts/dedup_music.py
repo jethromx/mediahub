@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """
-dedup_music.py — Copia tu biblioteca de MP3s a una carpeta sin repetidos.
+dedup_music.py — Gestiona duplicados en tu biblioteca MP3.
+
+Modos:
+  1. Copiar a carpeta limpia (por defecto):
+       python3 dedup_music.py <origen> <destino> [--dry-run] [--limit-gb N]
+  2. Borrar duplicados en la misma carpeta:
+       python3 dedup_music.py <origen> --delete-dupes [--dry-run]
 
 Criterios:
-  1. Identidad de canción: tags ID3 (artista + título). Fallback: nombre de fichero.
-  2. Duplicados: conserva el fichero de mayor tamaño (mejor calidad presumible).
-  3. Prioridad (con --limit-gb): usa el historial de Spotify para incluir primero
-     los artistas más escuchados. Nunca deja fuera canciones sin aplicar el límite.
-
-Uso:
-  python3 dedup_music.py <origen> <destino> [--dry-run] [--limit-gb N] [--spotify-data path]
+  - Identidad: tags ID3 (artista + título). Fallback: nombre de fichero.
+  - Cuando hay varios iguales, conserva el de MAYOR TAMAÑO (mejor calidad).
+  - Prioridad con --limit-gb: artistas con más escuchas en Spotify van primero.
 """
 
 import sys
@@ -101,6 +103,133 @@ def priority_score(entry: dict, spotify_plays: dict) -> tuple:
 # ─────────────────────────────────────────────────────────────────────────────
 # Core
 # ─────────────────────────────────────────────────────────────────────────────
+
+def run_delete_dupes(source_dir: Path, dry_run: bool = False):
+    """
+    Modo borrar duplicados: detecta y elimina directamente de source_dir
+    los ficheros duplicados, conservando el de mayor tamaño.
+    """
+    print(f"\n🧹  Limpieza de duplicados en carpeta")
+    print(f"    Carpeta: {source_dir}")
+    print(f"    Modo   : {'DRY RUN (nada se borrará)' if dry_run else '⚠️  BORRADO REAL'}")
+    print("=" * 60)
+
+    if not source_dir.exists():
+        print(f"\n[!] La carpeta no existe: {source_dir}")
+        sys.exit(1)
+
+    # 1. Escanear
+    print("\n[1/3] Escaneando MP3s...")
+    all_mp3s = sorted(source_dir.rglob("*.mp3"))
+    total = len(all_mp3s)
+    print(f"      Encontrados: {total:,}")
+    if total == 0:
+        print("      No hay MP3s.")
+        sys.exit(0)
+
+    # 2. Agrupar por identidad
+    print("\n[2/3] Detectando duplicados...")
+    groups: dict[str, list[dict]] = {}
+    for i, mp3 in enumerate(all_mp3s, 1):
+        if i % 300 == 0 or i == total:
+            print(f"      Procesados: {i:,}/{total:,}", end="\r", flush=True)
+        artist, title = read_tags(mp3)
+        key   = identity_key(artist, title, mp3)
+        entry = {"path": mp3, "artist": artist, "title": title, "size": mp3.stat().st_size}
+        groups.setdefault(key, []).append(entry)
+    print()
+
+    dup_groups = []
+    for key, entries in groups.items():
+        best       = max(entries, key=lambda e: e["size"])
+        duplicates = [e for e in entries if e is not best]
+        if duplicates:
+            dup_groups.append({"best": best, "duplicates": duplicates})
+
+    total_dup_files = sum(len(g["duplicates"]) for g in dup_groups)
+    total_dup_size  = sum(d["size"] for g in dup_groups for d in g["duplicates"])
+
+    print(f"      Grupos con dups   : {len(dup_groups):,}")
+    print(f"      Ficheros a borrar : {total_dup_files:,}")
+    print(f"      Espacio a liberar : {total_dup_size/1024**3:.2f} GB ({total_dup_size/1024**2:.0f} MB)")
+
+    if not dup_groups:
+        print("\n✅ ¡No hay duplicados! Tu carpeta ya está limpia.")
+        # Guarda análisis vacío
+        analysis_path = source_dir / "_dedup_analysis.json"
+        report = {
+            "mode": "delete_dupes", "source": str(source_dir), "dry_run": dry_run,
+            "total_source": total, "duplicates_removed": 0, "freed_mb": 0,
+            "duplicate_groups": [], "deleted_files": [],
+        }
+        with open(analysis_path, "w", encoding="utf-8") as f:
+            json.dump(report, f, ensure_ascii=False, indent=2)
+        return
+
+    # Muestra la lista
+    print(f"\n{'─'*60}")
+    print(f"  DUPLICADOS ({len(dup_groups):,} grupos)")
+    print(f"{'─'*60}")
+    for g in sorted(dup_groups, key=lambda x: x["best"]["path"].name):
+        best = g["best"]
+        print(f"\n  🎵 {best['path'].name[:60]}  ({best['size']//1024:,} KB — CONSERVAR)")
+        for d in g["duplicates"]:
+            print(f"     {'[DRY] ' if dry_run else ''}✗ BORRAR: {d['path'].name[:60]}  ({d['size']//1024:,} KB)")
+
+    # 3. Borrar
+    print(f"\n[3/3] {'Simulando borrado' if dry_run else 'Borrando duplicados'}...")
+    deleted = 0
+    errors  = 0
+    deleted_files = []
+
+    for g in dup_groups:
+        for d in g["duplicates"]:
+            try:
+                if not dry_run:
+                    d["path"].unlink()
+                deleted += 1
+                deleted_files.append({
+                    "deleted": str(d["path"]),
+                    "kept":    str(g["best"]["path"]),
+                    "size_kb": round(d["size"] / 1024),
+                })
+                print(f"  {'[DRY] ' if dry_run else ''}✗ {d['path'].name[:70]}")
+            except Exception as ex:
+                print(f"  ⚠️  Error borrando {d['path'].name}: {ex}")
+                errors += 1
+
+    freed_mb = round(total_dup_size / 1024**2, 1)
+    print(f"\n{'='*60}")
+    print(f"  {'[SIMULACIÓN] ' if dry_run else ''}Ficheros borrados : {deleted:,}")
+    print(f"  Errores           : {errors}")
+    print(f"  Espacio liberado  : {freed_mb} MB ({freed_mb/1024:.2f} GB)")
+    if not dry_run:
+        print(f"\n  ✅ ¡Carpeta limpia! {source_dir.resolve()}")
+
+    # Guardar análisis
+    analysis_path = source_dir / "_dedup_analysis.json"
+    report = {
+        "mode":             "delete_dupes",
+        "source":           str(source_dir),
+        "dry_run":          dry_run,
+        "total_source":     total,
+        "unique":           total - total_dup_files,
+        "duplicates_removed": deleted,
+        "freed_mb":         freed_mb,
+        "errors":           errors,
+        "duplicate_groups": [
+            {
+                "keep":   {"name": g["best"]["path"].name, "size_kb": round(g["best"]["size"]/1024)},
+                "remove": [{"name": d["path"].name, "size_kb": round(d["size"]/1024)} for d in g["duplicates"]],
+            }
+            for g in dup_groups
+        ],
+        "deleted_files": deleted_files,
+    }
+    with open(analysis_path, "w", encoding="utf-8") as f:
+        json.dump(report, f, ensure_ascii=False, indent=2)
+    print(f"  📄 Reporte: {analysis_path}\n")
+
 
 def run(source_dir: Path, dest_dir: Path,
         dry_run: bool = False,
@@ -342,21 +471,41 @@ def run(source_dir: Path, dest_dir: Path,
 # ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Exporta música sin duplicados")
-    parser.add_argument("source",      type=Path, help="Carpeta origen con MP3s")
-    parser.add_argument("dest",        type=Path, help="Carpeta destino")
-    parser.add_argument("--dry-run",   action="store_true", help="Solo analiza, no copia")
-    parser.add_argument("--limit-gb",  type=float, default=0, help="Límite en GB (0 = sin límite)")
+    parser = argparse.ArgumentParser(
+        description="Gestiona duplicados en tu biblioteca MP3",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Modos:
+  Borrar duplicados en la misma carpeta (recomendado para ahorrar espacio):
+    python3 dedup_music.py /ruta/musica --delete-dupes [--dry-run]
+
+  Copiar versión limpia a otra carpeta:
+    python3 dedup_music.py /ruta/musica /ruta/destino [--dry-run] [--limit-gb 32]
+""",
+    )
+    parser.add_argument("source", type=Path, help="Carpeta con tus MP3s")
+    parser.add_argument("dest",   type=Path, nargs="?", default=None,
+                        help="Carpeta destino (solo en modo copia)")
+    parser.add_argument("--delete-dupes", action="store_true",
+                        help="Borrar duplicados directamente en la carpeta origen")
+    parser.add_argument("--dry-run",  action="store_true",
+                        help="Solo analiza, no borra ni copia nada")
+    parser.add_argument("--limit-gb", type=float, default=0,
+                        help="Límite en GB para modo copia (0 = sin límite)")
     parser.add_argument("--spotify-data", type=Path, default=None,
-                        help="Ruta a top_artistas.json de Spotify para priorizar")
+                        help="Ruta a top_artistas.json para priorizar por escuchas")
     args = parser.parse_args()
 
-    limit_bytes = int(args.limit_gb * 1024**3) if args.limit_gb else 0
-
-    run(
-        source_dir   = args.source,
-        dest_dir     = args.dest,
-        dry_run      = args.dry_run,
-        limit_bytes  = limit_bytes,
-        spotify_data = args.spotify_data,
-    )
+    if args.delete_dupes:
+        run_delete_dupes(source_dir=args.source, dry_run=args.dry_run)
+    else:
+        if not args.dest:
+            parser.error("Debes indicar la carpeta destino, o usar --delete-dupes")
+        limit_bytes = int(args.limit_gb * 1024**3) if args.limit_gb else 0
+        run(
+            source_dir   = args.source,
+            dest_dir     = args.dest,
+            dry_run      = args.dry_run,
+            limit_bytes  = limit_bytes,
+            spotify_data = args.spotify_data,
+        )

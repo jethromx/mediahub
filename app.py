@@ -212,16 +212,16 @@ def page_inicio():
     with col5:
         st.markdown("""
         <div class="mh-card">
-            <span class="mh-card-icon">📱</span>
-            <div class="mh-card-title">Exportar al Móvil</div>
+            <span class="mh-card-icon">🧹</span>
+            <div class="mh-card-title">Limpiar duplicados</div>
             <div class="mh-card-desc">
-                Genera una copia de tu música <strong>sin repetidos</strong>,
-                con prioridad por escuchas de Spotify y límite de tamaño.
+                Detecta y borra los duplicados <strong>directamente en tu biblioteca</strong>,
+                liberando espacio sin crear carpetas extra.
             </div>
         </div>
         """, unsafe_allow_html=True)
-        if st.button("Ir a Exportar →", use_container_width=True, key="home_phone"):
-            st.session_state.page = "📱 Exportar al Móvil"
+        if st.button("Ir a Limpiar →", use_container_width=True, key="home_phone"):
+            st.session_state.page = "🧹 Limpiar duplicados"
             st.rerun()
 
     with col6:
@@ -972,198 +972,153 @@ def page_spotify():
 
 
 def page_phone():
-    st.title("📱 Exportar al Móvil")
+    st.title("🧹 Limpiar duplicados")
     cfg = load_config()
 
-    st.markdown(
-        "Escanea toda tu biblioteca de MP3s, elimina las canciones repetidas "
-        "y copia una versión limpia a una carpeta lista para transferir al celular."
-    )
+    source_folder = st.text_input("📁 Carpeta de música (tus MP3s)", value=cfg["music_folder"])
+    source_path   = Path(source_folder)
 
-    col1, col2 = st.columns(2)
-    with col1:
-        source_folder = st.text_input("📁 Carpeta origen (tus MP3s)", value=cfg["music_folder"])
-    with col2:
-        dest_folder = st.text_input("📱 Carpeta destino (para el móvil)", value=cfg["phone_folder"])
-
-    source_path = Path(source_folder)
-    dest_path   = Path(dest_folder)
-
-    # ── Límite de tamaño ──────────────────────────────────────────────────────
-    with st.expander("⚙️ Opciones avanzadas — Límite de tamaño", expanded=False):
-        st.markdown(
-            "Si tu celular o tarjeta SD tiene espacio limitado, activa el límite. "
-            "Las canciones se ordenarán por **escuchas en Spotify** (los artistas "
-            "que más escuchas van primero) para que nunca quede fuera lo que más te gusta."
-        )
-        col_lim1, col_lim2 = st.columns([1, 2])
-        with col_lim1:
-            use_limit = st.checkbox("Activar límite de tamaño",
-                                    value=cfg.get("phone_use_limit", False))
-        with col_lim2:
-            limit_gb = st.slider(
-                "Tamaño máximo (GB)", min_value=1, max_value=256,
-                value=cfg.get("phone_limit_gb", 32), step=1, disabled=not use_limit,
-                help="Solo se copiarán canciones hasta alcanzar este límite"
-            )
-        # Persiste los valores inmediatamente al cambiarlos
-        if use_limit != cfg.get("phone_use_limit") or limit_gb != cfg.get("phone_limit_gb"):
-            cfg["phone_use_limit"] = use_limit
-            cfg["phone_limit_gb"]  = limit_gb
-            save_config(cfg)
-
-        # Info de Spotify para prioridad
-        spotify_json = BASE_DIR / "output" / "top_artistas.json"
-        if use_limit:
-            if spotify_json.exists():
-                with open(spotify_json) as f:
-                    sp_data = json.load(f)
-                st.success(
-                    f"✅ Historial de Spotify disponible — {len(sp_data):,} artistas ordenados "
-                    f"por escuchas. Se usará para priorizar."
-                )
-            else:
-                st.warning(
-                    "⚠️ No se encontró `output/top_artistas.json`. "
-                    "Ejecuta primero **Mi Spotify** para generar el historial. "
-                    "Sin él, la prioridad será por tamaño de fichero."
-                )
-
-    # Métricas rápidas
+    # ── Métricas rápidas ──────────────────────────────────────────────────────
     st.markdown("---")
+    analysis_path = source_path / "_dedup_analysis.json"
+    last_report   = None
+    if analysis_path.exists():
+        try:
+            with open(analysis_path) as f:
+                last_report = json.load(f)
+        except Exception:
+            pass
+
     if source_path.exists():
         mp3s = list(source_path.rglob("*.mp3"))
         col_a, col_b, col_c, col_d = st.columns(4)
-        col_a.metric("MP3s en origen", f"{len(mp3s):,}")
-
-        # Lee último análisis o reporte
-        analysis_path = dest_path.parent / "_dedup_analysis.json"
-        report_path   = dest_path / "_dedup_report.json"
-        last_report   = None
-        if report_path.exists():
-            with open(report_path) as f:
-                last_report = json.load(f)
-        elif analysis_path.exists():
-            with open(analysis_path) as f:
-                last_report = json.load(f)
-
+        col_a.metric("🎵 MP3s en biblioteca", f"{len(mp3s):,}")
         if last_report:
-            col_b.metric("Únicas", f"{last_report.get('unique', 0):,}")
-            col_c.metric("Duplicados a quitar", f"{last_report.get('duplicates_removed', 0):,}")
-            excl = last_report.get("excluded_by_limit", 0)
-            col_d.metric("Excluidas por límite", f"{excl:,}" if excl else "—")
+            col_b.metric("✅ Canciones únicas",      f"{last_report.get('unique', 0):,}")
+            col_c.metric("🗑️ Duplicados detectados", f"{last_report.get('duplicates_removed', 0):,}")
+            freed = last_report.get("freed_mb", 0)
+            freed_str = f"{freed/1024:.2f} GB" if freed > 1024 else f"{freed:.0f} MB"
+            col_d.metric("💾 Espacio a liberar", freed_str if freed else "—")
         else:
-            col_b.metric("Únicas", "—")
-            col_c.metric("Duplicados", "—")
-            col_d.metric("Tamaño est.", "—")
+            col_b.metric("✅ Únicas", "—")
+            col_c.metric("🗑️ Duplicados", "—")
+            col_d.metric("💾 Por liberar", "—")
     else:
-        st.warning("⚠️ La carpeta origen no existe. Verifica la ruta.")
+        st.warning("⚠️ La carpeta no existe. Verifica la ruta en ⚙️ Configuración.")
 
-    # ── Tabs principales ──────────────────────────────────────────────────────
-    tab_run, tab_dups, tab_report = st.tabs(["▶ Ejecutar", "🔁 Lista de duplicados", "📊 Reporte"])
+    # ── Tabs ──────────────────────────────────────────────────────────────────
+    tab_run, tab_dups, tab_export = st.tabs([
+        "🧹 Limpiar duplicados",
+        "🔁 Lista de duplicados",
+        "📦 Exportar a carpeta",
+    ])
 
+    script = BASE_DIR / "scripts" / "dedup_music.py"
+
+    # ════════════════════════════════════════════════════════════════════════
+    # Tab 1 — Borrar duplicados en lugar
+    # ════════════════════════════════════════════════════════════════════════
     with tab_run:
-        st.markdown(
-            "**Flujo recomendado:** primero *Analizar* para ver los duplicados, "
-            "luego *Exportar* para copiar."
-        )
-        col_dry, col_run = st.columns(2)
+        st.markdown("""
+        <div style="background:rgba(120,80,255,0.08);border:1px solid rgba(120,80,255,0.2);
+                    border-radius:12px;padding:16px 20px;margin-bottom:16px;">
+            <div style="color:#c4b5fd;font-weight:700;margin-bottom:6px;">¿Qué hace?</div>
+            <div style="color:#8888b0;font-size:0.9rem;line-height:1.6;">
+                Escanea tu carpeta de música, detecta canciones repetidas y
+                <strong style="color:#e2e2f0;">borra los duplicados directamente</strong>
+                conservando siempre el archivo de mayor tamaño (mejor calidad).
+                No crea carpetas nuevas ni copia nada — solo limpia los sobrantes.
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
 
-        def build_cmd(dry: bool) -> list:
-            script = BASE_DIR / "scripts" / "dedup_music.py"
-            cmd = [PYTHON, "-u", str(script), source_folder, dest_folder]
-            if dry:
-                cmd.append("--dry-run")
-            if use_limit and limit_gb:
-                cmd += ["--limit-gb", str(limit_gb)]
-            if spotify_json.exists():
-                cmd += ["--spotify-data", str(spotify_json)]
-            return cmd
+        st.markdown("**Flujo recomendado:** primero *Analizar* → revisar la lista → luego *Borrar*.")
+
+        col_dry, col_del = st.columns(2)
 
         with col_dry:
-            if st.button("🔍 Analizar (sin copiar)", use_container_width=True):
+            if st.button("🔍 Analizar (sin borrar nada)", use_container_width=True):
                 if not source_path.exists():
-                    st.error("La carpeta origen no existe.")
+                    st.error("La carpeta no existe.")
                 else:
-                    cfg["phone_folder"] = dest_folder
+                    cfg["music_folder"] = source_folder
                     save_config(cfg)
                     status = st.empty()
                     log    = st.empty()
-                    status.info("🔍 Analizando — detectando duplicados y calculando tamaño...")
-                    ok = stream_script(build_cmd(dry=True), log, status)
+                    status.info("🔍 Analizando — detectando duplicados...")
+                    cmd = [PYTHON, "-u", str(script), source_folder, "--delete-dupes", "--dry-run"]
+                    ok = stream_script(cmd, log, status)
                     if ok:
                         status.success("✅ Análisis listo. Ve a la pestaña **🔁 Lista de duplicados**.")
                     else:
                         status.error("❌ Error durante el análisis")
 
-        with col_run:
-            if st.button("🚀 Exportar al móvil", type="primary", use_container_width=True):
+        with col_del:
+            # Confirmación antes de borrar
+            confirmar = st.checkbox(
+                "✅ Confirmo que quiero borrar los duplicados de forma permanente",
+                key="confirm_delete",
+            )
+            if st.button("🗑️ Borrar duplicados", type="primary",
+                         use_container_width=True, disabled=not confirmar):
                 if not source_path.exists():
-                    st.error("La carpeta origen no existe.")
+                    st.error("La carpeta no existe.")
                 else:
-                    cfg["phone_folder"] = dest_folder
+                    cfg["music_folder"] = source_folder
                     save_config(cfg)
                     status = st.empty()
                     log    = st.empty()
-                    lim_txt = f" (límite {limit_gb} GB)" if use_limit else ""
-                    status.info(f"⏳ Copiando música sin repetidos{lim_txt}...")
-                    ok = stream_script(build_cmd(dry=False), log, status)
+                    status.warning("🗑️ Borrando duplicados — esto es permanente...")
+                    cmd = [PYTHON, "-u", str(script), source_folder, "--delete-dupes"]
+                    ok = stream_script(cmd, log, status)
                     if ok:
-                        status.success(f"✅ ¡Listo! Carpeta en: {dest_folder}")
+                        status.success("✅ ¡Listo! Los duplicados han sido eliminados.")
                         st.balloons()
                     else:
                         status.error("❌ Terminó con errores")
 
         st.caption(
-            "💡 Con el **límite de tamaño activo**, si no caben todas las canciones, "
-            "se priorizan las de los artistas con más escuchas en tu historial de Spotify."
+            "💡 El criterio de desempate es el **tamaño del archivo** — "
+            "cuando hay varios iguales se conserva el más grande (presumiblemente mayor bitrate)."
         )
 
-    # ── Tab duplicados ────────────────────────────────────────────────────────
+    # ════════════════════════════════════════════════════════════════════════
+    # Tab 2 — Lista de duplicados
+    # ════════════════════════════════════════════════════════════════════════
     with tab_dups:
-        # Intenta cargar el análisis más reciente (dry-run o reporte real)
-        analysis_path = dest_path.parent / "_dedup_analysis.json"
-        report_path   = dest_path / "_dedup_report.json"
         data = None
-        data_source = None
-
-        if report_path.exists() and analysis_path.exists():
-            # Usa el más reciente
-            if report_path.stat().st_mtime >= analysis_path.stat().st_mtime:
-                data = json.load(open(report_path))
-                data_source = "reporte de exportación"
-            else:
-                data = json.load(open(analysis_path))
-                data_source = "análisis (dry run)"
-        elif report_path.exists():
-            data = json.load(open(report_path))
-            data_source = "reporte de exportación"
-        elif analysis_path.exists():
-            data = json.load(open(analysis_path))
-            data_source = "análisis (dry run)"
+        if analysis_path.exists():
+            try:
+                with open(analysis_path) as f:
+                    data = json.load(f)
+            except Exception:
+                pass
 
         if not data:
             st.info("Ejecuta primero **🔍 Analizar** para ver la lista de duplicados.")
         else:
             dup_groups = data.get("duplicate_groups", [])
-            excl       = data.get("excluded_songs", [])
+            dry = data.get("dry_run", True)
+            freed = data.get("freed_mb", 0)
+            freed_str = f"{freed/1024:.2f} GB" if freed > 1024 else f"{freed:.0f} MB"
 
-            st.caption(f"Datos del último {data_source} · Origen: {data.get('source', '—')}")
+            estado = "🔵 Análisis (sin borrar)" if dry else "🟢 Limpieza ejecutada"
+            st.caption(f"{estado} · {data.get('source', '—')}")
 
             col1, col2, col3 = st.columns(3)
-            col1.metric("Grupos duplicados",   f"{len(dup_groups):,}")
-            col2.metric("Ficheros a omitir",   f"{data.get('duplicates_removed', 0):,}")
-            col3.metric("Excluidas por límite", f"{len(excl):,}" if excl else "—")
+            col1.metric("Grupos duplicados",    f"{len(dup_groups):,}")
+            col2.metric("Ficheros a/borrados",  f"{data.get('duplicates_removed', 0):,}")
+            col3.metric("Espacio liberado",      freed_str if freed else "—")
 
-            # ── Lista de duplicados ───────────────────────────────────────────
             if dup_groups:
-                st.markdown(f"#### 🔁 Canciones con duplicados ({len(dup_groups):,} grupos)")
+                st.markdown(f"#### 🔁 Duplicados detectados ({len(dup_groups):,} grupos)")
                 st.markdown(
-                    "La versión marcada con ✅ es la que **se conserva** (mayor tamaño). "
-                    "Las marcadas con ✗ se **omiten**."
+                    "La versión con ✅ es la que **se conserva** (mayor tamaño). "
+                    "Las marcadas con ✗ son las que se borran."
                 )
-
-                search = st.text_input("🔎 Filtrar por nombre", placeholder="ej: metallica, enter sandman...")
+                search = st.text_input("🔎 Filtrar por nombre",
+                                       placeholder="ej: metallica, enter sandman...",
+                                       key="dup_search")
                 filtered = dup_groups
                 if search:
                     q = search.lower()
@@ -1174,74 +1129,108 @@ def page_phone():
                 st.caption(f"Mostrando {min(len(filtered), 200):,} de {len(filtered):,} grupos")
 
                 for g in filtered[:200]:
-                    keep    = g["keep"]
-                    remove  = g["remove"]
+                    keep   = g["keep"]
+                    remove = g["remove"]
                     with st.container():
-                        col_k, col_r = st.columns([3, 1])
+                        col_k, col_r = st.columns([4, 1])
                         with col_k:
                             st.markdown(f"**🎵 {keep['name'][:70]}**")
                             st.caption(f"  ✅ Conservar: `{keep['name'][:60]}`  —  {keep['size_kb']:,} KB")
                             for d in remove:
-                                st.caption(f"  ✗ Omitir:    `{d['name'][:60]}`  —  {d['size_kb']:,} KB")
+                                st.caption(f"  ✗ Borrar:    `{d['name'][:60]}`  —  {d['size_kb']:,} KB")
                         with col_r:
                             saved_kb = sum(d["size_kb"] for d in remove)
-                            st.caption(f"Ahorra {saved_kb:,} KB")
+                            st.caption(f"−{saved_kb:,} KB")
                         st.divider()
 
                 if len(filtered) > 200:
-                    st.caption(f"... y {len(filtered)-200} grupos más (usa el filtro para buscar)")
+                    st.caption(f"... y {len(filtered)-200} grupos más (usa el filtro)")
+            else:
+                st.success("✅ ¡No hay duplicados! Tu biblioteca está limpia.")
 
-            # ── Excluidas por límite ──────────────────────────────────────────
-            if excl:
-                with st.expander(f"↷ Canciones excluidas por límite de tamaño ({len(excl):,})"):
-                    st.markdown(
-                        "Estas canciones **no caben** dentro del límite configurado. "
-                        "Son los artistas con menos escuchas en Spotify."
-                    )
-                    for e in excl:
-                        plays = e.get("spotify_plays", 0)
-                        plays_str = f"  [{plays:,} plays]" if plays else ""
-                        st.caption(f"↷ {e.get('name', '?')[:70]}  —  {e.get('size_kb', 0):,} KB{plays_str}")
+    # ════════════════════════════════════════════════════════════════════════
+    # Tab 3 — Exportar a carpeta (modo anterior, ahora opcional)
+    # ════════════════════════════════════════════════════════════════════════
+    with tab_export:
+        st.markdown("""
+        <div style="background:rgba(96,165,250,0.08);border:1px solid rgba(96,165,250,0.2);
+                    border-radius:12px;padding:14px 18px;margin-bottom:16px;">
+            <div style="color:#93c5fd;font-weight:700;margin-bottom:4px;">Modo exportar</div>
+            <div style="color:#6688aa;font-size:0.88rem;">
+                Crea una carpeta nueva con una copia limpia de tu música
+                (útil para transferir al celular o hacer backup).
+                La carpeta origen no se modifica.
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
 
-    # ── Tab reporte ───────────────────────────────────────────────────────────
-    with tab_report:
-        report_path = dest_path / "_dedup_report.json"
-        if not report_path.exists():
-            st.info("Aún no hay reporte de exportación. Ejecuta **🚀 Exportar al móvil** primero.")
-        else:
-            with open(report_path) as f:
-                report = json.load(f)
+        dest_folder = st.text_input("📱 Carpeta destino (copia limpia)", value=cfg["phone_folder"])
+        dest_path   = Path(dest_folder)
+        spotify_json = BASE_DIR / "output" / "top_artistas.json"
 
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("Total en origen",     f"{report.get('total_source', 0):,}")
-            col2.metric("Copiadas al móvil",   f"{report.get('unique', 0):,}")
-            col3.metric("Dups eliminados",      f"{report.get('duplicates_removed', 0):,}")
-            col4.metric("Tamaño final",
-                        f"{report.get('size_total_mb', 0)/1024:.2f} GB"
-                        if report.get('size_total_mb', 0) > 1024
-                        else f"{report.get('size_total_mb', 0):.0f} MB")
+        with st.expander("⚙️ Límite de tamaño", expanded=False):
+            st.markdown(
+                "Si el destino tiene espacio limitado, activa el límite. "
+                "Las canciones se priorizan por **escuchas en Spotify**."
+            )
+            col_lim1, col_lim2 = st.columns([1, 2])
+            with col_lim1:
+                use_limit = st.checkbox("Activar límite", value=cfg.get("phone_use_limit", False))
+            with col_lim2:
+                limit_gb = st.slider("Máximo (GB)", 1, 256,
+                                     cfg.get("phone_limit_gb", 32), 1,
+                                     disabled=not use_limit)
+            if use_limit != cfg.get("phone_use_limit") or limit_gb != cfg.get("phone_limit_gb"):
+                cfg["phone_use_limit"] = use_limit
+                cfg["phone_limit_gb"]  = limit_gb
+                save_config(cfg)
+            if use_limit and spotify_json.exists():
+                with open(spotify_json) as f:
+                    sp = json.load(f)
+                st.success(f"✅ Historial Spotify — {len(sp):,} artistas para priorizar.")
+            elif use_limit:
+                st.warning("Sin historial de Spotify, la prioridad será por tamaño de archivo.")
 
-            if report.get("limit_gb"):
-                st.info(f"📏 Límite aplicado: {report['limit_gb']} GB")
+        def build_export_cmd(dry: bool) -> list:
+            cmd = [PYTHON, "-u", str(script), source_folder, dest_folder]
+            if dry:
+                cmd.append("--dry-run")
+            if use_limit and limit_gb:
+                cmd += ["--limit-gb", str(limit_gb)]
+            if spotify_json.exists():
+                cmd += ["--spotify-data", str(spotify_json)]
+            return cmd
 
-            pct = round(report.get('duplicates_removed', 0)
-                        / max(report.get('total_source', 1), 1) * 100, 1)
-            st.caption(f"Se redujo la biblioteca un {pct}% al eliminar duplicados")
-
-            files = report.get("files", [])
-            with st.expander(f"✅ Canciones exportadas ({len(files):,})"):
-                search2 = st.text_input("🔎 Filtrar", key="rep_search",
-                                        placeholder="ej: metallica...")
-                show = [f for f in files
-                        if not search2 or search2.lower() in f.get("dest","").lower()]
-                for f in show[:300]:
-                    plays = f.get("spotify_plays", 0)
-                    plays_str = f"  ♪{plays:,}" if plays else ""
-                    dups_n = len(f.get("duplicates", []))
-                    dup_str = f"  [{dups_n} dup]" if dups_n else ""
-                    st.caption(f"• {f['dest'][:70]}  —  {f.get('size_kb',0):,} KB{plays_str}{dup_str}")
-                if len(show) > 300:
-                    st.caption(f"... y {len(show)-300} más")
+        col_dry2, col_run2 = st.columns(2)
+        with col_dry2:
+            if st.button("🔍 Analizar exportación", use_container_width=True, key="exp_dry"):
+                if not source_path.exists():
+                    st.error("La carpeta origen no existe.")
+                else:
+                    cfg["phone_folder"] = dest_folder
+                    save_config(cfg)
+                    status = st.empty(); log = st.empty()
+                    status.info("🔍 Analizando...")
+                    ok = stream_script(build_export_cmd(dry=True), log, status)
+                    if ok:
+                        status.success("✅ Análisis listo.")
+        with col_run2:
+            if st.button("🚀 Exportar copia limpia", type="primary",
+                         use_container_width=True, key="exp_run"):
+                if not source_path.exists():
+                    st.error("La carpeta origen no existe.")
+                else:
+                    cfg["phone_folder"] = dest_folder
+                    save_config(cfg)
+                    status = st.empty(); log = st.empty()
+                    lim_txt = f" (límite {limit_gb} GB)" if use_limit else ""
+                    status.info(f"⏳ Copiando música sin repetidos{lim_txt}...")
+                    ok = stream_script(build_export_cmd(dry=False), log, status)
+                    if ok:
+                        status.success(f"✅ ¡Listo! Carpeta en: {dest_folder}")
+                        st.balloons()
+                    else:
+                        status.error("❌ Terminó con errores")
 
 
 def page_ayuda():
@@ -1357,7 +1346,7 @@ artistas más escuchados y buscar sus discografías completas en The Pirate Bay.
 | `output/top_artistas.json` | Todos tus artistas ordenados por reproducciones |
 | `output/top_canciones.json` | Top 200 canciones más escuchadas |
 
-> **Nota:** El fichero `top_artistas.json` también lo usa la sección **📱 Exportar al Móvil**
+> **Nota:** El fichero `top_artistas.json` también lo usa la sección **🧹 Limpiar duplicados**
 > para priorizar qué canciones incluir cuando hay un límite de tamaño.
 """)
 
@@ -1398,7 +1387,7 @@ bases de datos musicales gratuitas.
 """)
 
     # ── Exportar al Móvil ─────────────────────────────────────────────────────
-    with st.expander("📱 Exportar al Móvil — Sin canciones repetidas", expanded=False):
+    with st.expander("🧹 Limpiar duplicados — Sin canciones repetidas", expanded=False):
         st.markdown("""
 **¿Qué hace?**
 Escanea toda tu biblioteca de MP3s, detecta canciones duplicadas y copia una sola versión
@@ -1499,8 +1488,8 @@ spotify-export/
    └─ 🔧 Fix Metadata → completa tags y portadas de todos los MP3s
 
 4. EXPORTAR AL CELULAR
-   ├─ 📱 Exportar al Móvil → Analizar (dry run) → ver duplicados
-   └─ 📱 Exportar al Móvil → Exportar → copiar carpeta al celular
+   ├─ 🧹 Limpiar duplicados → Analizar (dry run) → ver duplicados
+   └─ 🧹 Limpiar duplicados → Exportar → copiar carpeta al celular
 ```
 """)
 
@@ -1986,7 +1975,7 @@ with st.sidebar:
         ("📚 Ebooks",           "📚"),
         ("🟢 Mi Spotify",       "🟢"),
         ("🔧 Fix Metadata",     "🔧"),
-        ("📱 Exportar al Móvil","📱"),
+        ("🧹 Limpiar duplicados","📱"),
         ("⚙️ Configuración",    "⚙️"),
         ("📖 Ayuda",            "📖"),
     ]
@@ -2008,7 +1997,7 @@ with st.sidebar:
     "📚 Ebooks":           page_ebooks,
     "🟢 Mi Spotify":       page_spotify,
     "🔧 Fix Metadata":     page_metadata,
-    "📱 Exportar al Móvil": page_phone,
+    "🧹 Limpiar duplicados": page_phone,
     "⚙️ Configuración":    page_config,
     "📖 Ayuda":            page_ayuda,
 }[st.session_state.page]()
