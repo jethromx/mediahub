@@ -227,16 +227,16 @@ def page_inicio():
     with col6:
         st.markdown("""
         <div class="mh-card">
-            <span class="mh-card-icon">⚙️</span>
-            <div class="mh-card-title">Configuración</div>
+            <span class="mh-card-icon">📊</span>
+            <div class="mh-card-title">Explorador</div>
             <div class="mh-card-desc">
-                API keys, carpetas de música / ebooks / móvil,
-                géneros activos y preferencias que persisten entre sesiones.
+                Visualiza qué carpetas ocupan más espacio, navega nivel a nivel
+                y detecta dónde está el peso de tu biblioteca.
             </div>
         </div>
         """, unsafe_allow_html=True)
-        if st.button("Ir a Config →", use_container_width=True, key="home_cfg"):
-            st.session_state.page = "⚙️ Configuración"
+        if st.button("Ir a Explorador →", use_container_width=True, key="home_exp"):
+            st.session_state.page = "📊 Explorador"
             st.rerun()
 
 
@@ -1606,6 +1606,273 @@ def page_config():
         st.success("✅ Configuración guardada")
 
 
+def page_explorador():
+    import os
+
+    st.title("📊 Explorador de carpetas")
+    cfg = load_config()
+
+    # ── Selector de carpeta raíz ──────────────────────────────────────────────
+    col_folder, col_ext = st.columns([3, 1])
+    with col_folder:
+        root_folder = st.text_input(
+            "📁 Carpeta a explorar",
+            value=st.session_state.get("exp_folder", cfg["music_folder"]),
+            key="exp_folder_input",
+        )
+    with col_ext:
+        ext_filter = st.selectbox(
+            "Tipo de archivo",
+            ["Todos", "MP3", "FLAC", "M4A", "WAV", "EPUB/MOBI"],
+            key="exp_ext",
+        )
+    ext_map = {
+        "Todos":       None,
+        "MP3":         [".mp3"],
+        "FLAC":        [".flac"],
+        "M4A":         [".m4a"],
+        "WAV":         [".wav"],
+        "EPUB/MOBI":   [".epub", ".mobi", ".azw3"],
+    }
+    exts = ext_map[ext_filter]
+
+    # Guarda la carpeta en session_state para navegación de drill-down
+    if root_folder != st.session_state.get("exp_folder"):
+        st.session_state.exp_folder     = root_folder
+        st.session_state.exp_drill_path = root_folder
+
+    if "exp_drill_path" not in st.session_state:
+        st.session_state.exp_drill_path = root_folder
+
+    root_path  = Path(root_folder)
+    drill_path = Path(st.session_state.exp_drill_path)
+
+    # Si el drill_path quedó fuera del root tras cambiar carpeta, resetea
+    if not str(drill_path).startswith(str(root_path)):
+        st.session_state.exp_drill_path = root_folder
+        drill_path = root_path
+
+    if not root_path.exists():
+        st.warning("⚠️ La carpeta no existe. Verifica la ruta.")
+        return
+
+    # ── Accesos rápidos ───────────────────────────────────────────────────────
+    quick_cols = st.columns(3)
+    quick_folders = [
+        ("🎵 Música",  cfg["music_folder"]),
+        ("📚 Ebooks",  cfg["ebooks_folder"]),
+        ("🏠 Home",    str(Path.home())),
+    ]
+    for i, (label, qpath) in enumerate(quick_folders):
+        with quick_cols[i]:
+            if st.button(label, use_container_width=True, key=f"quick_{i}"):
+                st.session_state.exp_folder     = qpath
+                st.session_state.exp_drill_path = qpath
+                st.rerun()
+
+    st.markdown("---")
+
+    # ── Helpers ───────────────────────────────────────────────────────────────
+    def fmt_size(b: int) -> str:
+        for unit in ("B", "KB", "MB", "GB", "TB"):
+            if b < 1024:
+                return f"{b:.1f} {unit}"
+            b /= 1024
+        return f"{b:.1f} PB"
+
+    def count_and_size(folder: Path, extensions) -> tuple[int, int]:
+        """Devuelve (nº archivos, tamaño total bytes)."""
+        total_size  = 0
+        total_files = 0
+        try:
+            for entry in os.scandir(folder):
+                if entry.is_file(follow_symlinks=False):
+                    if extensions is None or Path(entry.name).suffix.lower() in extensions:
+                        total_size  += entry.stat(follow_symlinks=False).st_size
+                        total_files += 1
+                elif entry.is_dir(follow_symlinks=False):
+                    s, n = count_and_size(Path(entry.path), extensions)
+                    total_size  += s
+                    total_files += n
+        except PermissionError:
+            pass
+        return total_files, total_size
+
+    # ── Breadcrumb ────────────────────────────────────────────────────────────
+    rel_parts = []
+    try:
+        rel = drill_path.relative_to(root_path)
+        rel_parts = rel.parts
+    except ValueError:
+        pass
+
+    crumb_html = f'<span style="color:#5555a0;">📁 {root_path.name}</span>'
+    for i, part in enumerate(rel_parts):
+        crumb_html += f' <span style="color:#44448a;">/</span> <span style="color:#c4b5fd;">{part}</span>'
+    st.markdown(f'<div style="font-size:0.85rem;margin-bottom:8px;">{crumb_html}</div>',
+                unsafe_allow_html=True)
+
+    # Botón subir nivel
+    if drill_path != root_path:
+        if st.button("⬆ Subir nivel", key="go_up"):
+            st.session_state.exp_drill_path = str(drill_path.parent)
+            st.rerun()
+
+    # ── Escanear subcarpetas directas ─────────────────────────────────────────
+    with st.spinner("Calculando tamaños..."):
+        try:
+            subdirs = sorted(
+                [d for d in drill_path.iterdir() if d.is_dir() and not d.name.startswith(".")],
+                key=lambda d: d.name,
+            )
+        except PermissionError:
+            st.error("Sin permisos para leer esta carpeta.")
+            return
+
+        # Archivos directo en esta carpeta (sin subcarpetas)
+        direct_files = []
+        try:
+            direct_files = [
+                f for f in drill_path.iterdir()
+                if f.is_file() and (exts is None or f.suffix.lower() in exts)
+            ]
+        except PermissionError:
+            pass
+
+        # Calcula stats por subcarpeta
+        rows = []
+        for d in subdirs:
+            n_files, size_bytes = count_and_size(d, exts)
+            rows.append({
+                "path":       d,
+                "name":       d.name,
+                "files":      n_files,
+                "size_bytes": size_bytes,
+            })
+
+        rows.sort(key=lambda r: r["size_bytes"], reverse=True)
+
+    # ── Stats globales ────────────────────────────────────────────────────────
+    total_bytes = sum(r["size_bytes"] for r in rows)
+    direct_size = sum(f.stat().st_size for f in direct_files)
+    grand_total = total_bytes + direct_size
+    total_files_all = sum(r["files"] for r in rows) + len(direct_files)
+
+    col_s1, col_s2, col_s3, col_s4 = st.columns(4)
+    col_s1.metric("💾 Tamaño total",     fmt_size(grand_total))
+    col_s2.metric("📁 Subcarpetas",      f"{len(subdirs):,}")
+    col_s3.metric("📄 Archivos totales", f"{total_files_all:,}")
+    col_s4.metric("📄 En esta carpeta",  f"{len(direct_files):,}  ({fmt_size(direct_size)})" if direct_files else "0")
+
+    if not rows and not direct_files:
+        st.info("Esta carpeta está vacía.")
+        return
+
+    st.markdown("---")
+
+    # ── Tabla de subcarpetas con barras ───────────────────────────────────────
+    if rows:
+        max_bytes = rows[0]["size_bytes"] if rows else 1
+
+        st.markdown(f'<div class="mh-section-title">Subcarpetas ({len(rows)})</div>',
+                    unsafe_allow_html=True)
+
+        for r in rows:
+            if r["size_bytes"] == 0 and r["files"] == 0:
+                continue
+
+            pct = r["size_bytes"] / max_bytes if max_bytes else 0
+            bar_pct = max(int(pct * 100), 1)
+
+            # Color según tamaño relativo
+            if pct >= 0.75:
+                bar_color = "#f87171"   # rojo
+                badge_cls = "mh-badge-red"
+            elif pct >= 0.4:
+                bar_color = "#fbbf24"   # amarillo
+                badge_cls = "mh-badge-yellow"
+            elif pct >= 0.15:
+                bar_color = "#60a5fa"   # azul
+                badge_cls = "mh-badge-blue"
+            else:
+                bar_color = "#34d399"   # verde
+                badge_cls = "mh-badge-green"
+
+            col_name, col_bar, col_meta, col_btn = st.columns([3, 4, 2, 1])
+
+            with col_name:
+                st.markdown(
+                    f'<div style="color:#e2e2f0;font-weight:600;font-size:0.9rem;'
+                    f'padding-top:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'
+                    f'📁 {r["name"]}</div>',
+                    unsafe_allow_html=True,
+                )
+
+            with col_bar:
+                st.markdown(
+                    f'<div style="margin-top:10px;background:rgba(255,255,255,0.06);'
+                    f'border-radius:6px;height:14px;overflow:hidden;">'
+                    f'<div style="width:{bar_pct}%;background:{bar_color};height:100%;'
+                    f'border-radius:6px;transition:width 0.3s;"></div></div>',
+                    unsafe_allow_html=True,
+                )
+
+            with col_meta:
+                st.markdown(
+                    f'<div style="text-align:right;padding-top:4px;">'
+                    f'<span class="mh-badge {badge_cls}">{fmt_size(r["size_bytes"])}</span><br>'
+                    f'<span style="color:#55558a;font-size:0.72rem;">{r["files"]:,} archivos</span>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+
+            with col_btn:
+                if st.button("→", key=f"drill_{r['name']}", help=f"Entrar en {r['name']}"):
+                    st.session_state.exp_drill_path = str(r["path"])
+                    st.rerun()
+
+    # ── Archivos directos ─────────────────────────────────────────────────────
+    if direct_files:
+        direct_files_sorted = sorted(direct_files, key=lambda f: f.stat().st_size, reverse=True)
+        with st.expander(f"📄 Archivos en esta carpeta ({len(direct_files):,}  —  {fmt_size(direct_size)})",
+                         expanded=len(subdirs) == 0):
+            search_f = st.text_input("🔎 Filtrar archivos", key="exp_file_search",
+                                     placeholder="ej: metallica...")
+            show_files = [f for f in direct_files_sorted
+                          if not search_f or search_f.lower() in f.name.lower()]
+
+            max_file_size = direct_files_sorted[0].stat().st_size if direct_files_sorted else 1
+            for f in show_files[:300]:
+                sz = f.stat().st_size
+                bar_w = max(int(sz / max_file_size * 100), 1)
+                st.markdown(
+                    f'<div style="display:flex;align-items:center;gap:10px;margin:3px 0;">'
+                    f'<div style="min-width:200px;max-width:300px;overflow:hidden;'
+                    f'text-overflow:ellipsis;white-space:nowrap;color:#c5c5e8;font-size:0.83rem;">'
+                    f'{f.name}</div>'
+                    f'<div style="flex:1;background:rgba(255,255,255,0.05);border-radius:4px;height:8px;">'
+                    f'<div style="width:{bar_w}%;background:#7050ff;height:100%;border-radius:4px;"></div></div>'
+                    f'<div style="min-width:70px;text-align:right;color:#55558a;font-size:0.78rem;">'
+                    f'{fmt_size(sz)}</div></div>',
+                    unsafe_allow_html=True,
+                )
+            if len(show_files) > 300:
+                st.caption(f"... y {len(show_files)-300} archivos más")
+
+    # ── Gráfico top-10 ────────────────────────────────────────────────────────
+    if rows:
+        top10 = [r for r in rows[:10] if r["size_bytes"] > 0]
+        if top10:
+            st.markdown("---")
+            st.markdown('<div class="mh-section-title">Top 10 subcarpetas por tamaño</div>',
+                        unsafe_allow_html=True)
+            chart_data = {r["name"][:28]: round(r["size_bytes"] / 1024**2, 1) for r in top10}
+            import pandas as pd
+            df = pd.DataFrame.from_dict(chart_data, orient="index", columns=["MB"])
+            st.bar_chart(df, color="#7050ff", height=280)
+            st.caption("Tamaño en MB · Haz clic en → para entrar en una subcarpeta")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Layout principal
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1970,14 +2237,15 @@ with st.sidebar:
     """, unsafe_allow_html=True)
 
     pages = [
-        ("🏠 Inicio",           "🏠"),
-        ("🎵 Música",           "🎵"),
-        ("📚 Ebooks",           "📚"),
-        ("🟢 Mi Spotify",       "🟢"),
-        ("🔧 Fix Metadata",     "🔧"),
-        ("🧹 Limpiar duplicados","📱"),
-        ("⚙️ Configuración",    "⚙️"),
-        ("📖 Ayuda",            "📖"),
+        ("🏠 Inicio",            "🏠"),
+        ("🎵 Música",            "🎵"),
+        ("📚 Ebooks",            "📚"),
+        ("🟢 Mi Spotify",        "🟢"),
+        ("🔧 Fix Metadata",      "🔧"),
+        ("🧹 Limpiar duplicados","🧹"),
+        ("📊 Explorador",        "📊"),
+        ("⚙️ Configuración",     "⚙️"),
+        ("📖 Ayuda",             "📖"),
     ]
     for p, _ in pages:
         if st.button(p, use_container_width=True, key=f"nav_{p}",
@@ -1992,12 +2260,13 @@ with st.sidebar:
 
 # Renderiza la página activa
 {
-    "🏠 Inicio":           page_inicio,
-    "🎵 Música":           page_musica,
-    "📚 Ebooks":           page_ebooks,
-    "🟢 Mi Spotify":       page_spotify,
-    "🔧 Fix Metadata":     page_metadata,
+    "🏠 Inicio":             page_inicio,
+    "🎵 Música":             page_musica,
+    "📚 Ebooks":             page_ebooks,
+    "🟢 Mi Spotify":         page_spotify,
+    "🔧 Fix Metadata":       page_metadata,
     "🧹 Limpiar duplicados": page_phone,
-    "⚙️ Configuración":    page_config,
-    "📖 Ayuda":            page_ayuda,
+    "📊 Explorador":         page_explorador,
+    "⚙️ Configuración":      page_config,
+    "📖 Ayuda":              page_ayuda,
 }[st.session_state.page]()
