@@ -1,0 +1,21 @@
+# Datos personales de Spotify
+spotify_data/
+my_spotify_data.zip
+*.zip
+
+# Configuración (contiene API keys)
+config.json
+
+# Resultados generados
+output/
+output_ebooks/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# macOS
+.DS_Store
