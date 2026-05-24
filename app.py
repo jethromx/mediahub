@@ -1966,6 +1966,8 @@ def _render_torrents(good_torrents: list, blocked_torrents: list,
     for t in good_torrents:
         rank      = t.get("rank", 0)
         is_best   = t.get("best", False)
+        seeds     = t.get("seeds", 0)
+        is_dead   = seeds == 0
         saved_key = f"saved_{key_prefix}_{rank}"
         is_saved  = st.session_state.get(saved_key, False)
         mag       = t["magnet"]
@@ -1973,7 +1975,9 @@ def _render_torrents(good_torrents: list, blocked_torrents: list,
         source    = t.get("source", "TPB")
 
         # ── Badge de idioma / fuente ──────────────────────────────────────────
-        if source == "YTS":
+        if is_dead:
+            lang_badge, border = "⚫ Sin seeds",           "rgba(80,80,80,0.2)"
+        elif source == "YTS":
             lang_badge, border = "🎬 YTS · Alta calidad", "rgba(251,191,36,0.5)"
         elif s == 2:
             lang_badge, border = "🇲🇽 Latino",            "rgba(52,211,153,0.55)"
@@ -1992,6 +1996,13 @@ def _render_torrents(good_torrents: list, blocked_torrents: list,
                 'color:#fff;font-size:0.7rem;font-weight:800;padding:2px 10px;'
                 'border-radius:20px;margin-right:8px;letter-spacing:0.5px;">'
                 '⭐ MEJOR OPCIÓN</span>'
+            )
+        elif is_dead:
+            best_ribbon = (
+                '<span style="background:rgba(60,60,60,0.6);'
+                'color:#666;font-size:0.7rem;font-weight:700;padding:2px 10px;'
+                'border-radius:20px;margin-right:8px;">'
+                '💀 Sin seeds — no disponible</span>'
             )
 
         rank_txt = f'<span style="color:#44448a;font-size:0.75rem;">#{rank+1}</span>'

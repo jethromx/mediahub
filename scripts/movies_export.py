@@ -371,19 +371,35 @@ def composite_score(t: dict) -> tuple:
     """
     Puntuación compuesta para ordenar torrents de mejor a peor.
 
-    Prioridades (en orden):
-      1. Idioma: Latino(2) > Español(1) > Sin info(0) > España(-1)
-      2. Calidad: REMUX/BluRay > WEB-DL > WEBRip > DVDRip …
-         YTS suma +2 porque siempre es BluRay/WEB garantizado
-      3. Seeds: normalizados con log para que no dominen sobre calidad
+    Un torrent sin seeds es INÚTIL — se filtra antes de llamar esta función.
+    Orden de prioridades:
+      1. Seeds: al menos "vivo" (≥1) vs "activo" (≥10) vs "popular" (≥50)
+         → Bucket: 0=sin seeds, 1=pocos, 2=ok, 3=bueno, 4=excelente
+      2. Idioma: Latino(2) > Español(1) > Sin info(0) > España(-1)
+      3. Calidad: REMUX/BluRay > WEB-DL > WEBRip …  + bonus YTS (+2)
+      4. Seeds exactos (desempate fino)
     """
     import math
+    seeds = t.get("seeds", 0)
     s     = t.get("s_score", 0)
     q     = t.get("q_score", 0)
-    seeds = t.get("seeds", 0)
-    yts_b = 2 if t.get("source") == "YTS" else 0          # bonus YTS
-    seed_n = math.log10(seeds + 1)                         # 0→0, 10→1, 100→2, 1000→3
-    return (s, q + yts_b, round(seed_n, 2))
+    yts_b = 2 if t.get("source") == "YTS" else 0
+
+    # Bucket de seeds: garantiza que un torrent vivo siempre supera a uno muerto
+    if seeds == 0:
+        seed_bucket = 0
+    elif seeds < 5:
+        seed_bucket = 1
+    elif seeds < 20:
+        seed_bucket = 2
+    elif seeds < 100:
+        seed_bucket = 3
+    else:
+        seed_bucket = 4
+
+    seed_fine = round(math.log10(seeds + 1), 2)   # desempate dentro del mismo bucket
+
+    return (seed_bucket, s, q + yts_b, seed_fine)
 
 
 def find_movie_torrents_combined(title: str, year: str,
@@ -411,14 +427,21 @@ def find_movie_torrents_combined(title: str, year: str,
         seen.add(ih)
         dedup.append(t)
 
-    dedup.sort(key=composite_score, reverse=True)
+    # Separar vivos (seeds ≥ 1) de muertos (sin seeds) — los muertos van al final
+    alive = [t for t in dedup if t.get("seeds", 0) > 0]
+    dead  = [t for t in dedup if t.get("seeds", 0) == 0]
+
+    alive.sort(key=composite_score, reverse=True)
+    dead.sort(key=lambda t: t.get("q_score", 0), reverse=True)  # muertos: al menos por calidad
+
+    ordered = alive + dead
 
     # Marcar posición
-    for i, t in enumerate(dedup):
+    for i, t in enumerate(ordered):
         t["rank"] = i
-        t["best"] = (i == 0)
+        t["best"] = (i == 0 and t.get("seeds", 0) > 0)  # "best" solo si tiene seeds
 
-    return dedup[:n], blocked
+    return ordered[:n], blocked
 
 
 # ─────────────────────────────────────────────────────────────────────────────
