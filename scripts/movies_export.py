@@ -449,27 +449,47 @@ def find_movie_torrents_combined(title: str, year: str,
 # ─────────────────────────────────────────────────────────────────────────────
 
 def tmdb_discover(api_key: str, year_gte: int, year_lte: int,
-                  genre_id: int = None, page: int = 1, limit: int = 20) -> list[dict]:
-    """Descubre películas populares en un rango de años."""
-    params = {
-        "api_key":                    api_key,
-        "language":                   "es-MX",
-        "sort_by":                    "popularity.desc",
-        "primary_release_date.gte":   f"{year_gte}-01-01",
-        "primary_release_date.lte":   f"{year_lte}-12-31",
-        "vote_count.gte":             100,
-        "page":                       page,
-    }
-    if genre_id:
-        params["with_genres"] = genre_id
+                  genre_id: int = None, limit: int = 20,
+                  sort_by: str = "popularity.desc") -> list[dict]:
+    """
+    Descubre películas en un rango de años.
+    Pagina automáticamente para alcanzar `limit` (máx 200).
+    sort_by: 'popularity.desc' | 'primary_release_date.desc' |
+             'primary_release_date.asc' | 'vote_average.desc'
+    """
+    results   = []
+    page      = 1
+    max_pages = 10   # TMDB devuelve 20 por página → hasta 200 resultados
 
-    url  = f"{TMDB_BASE}/discover/movie?" + urllib.parse.urlencode(params)
-    data = http_get(url)
-    if not data:
-        return []
+    while len(results) < limit and page <= max_pages:
+        params = {
+            "api_key":                    api_key,
+            "language":                   "es-MX",
+            "sort_by":                    sort_by,
+            "primary_release_date.gte":   f"{year_gte}-01-01",
+            "primary_release_date.lte":   f"{year_lte}-12-31",
+            "vote_count.gte":             50,
+            "page":                       page,
+        }
+        if genre_id:
+            params["with_genres"] = genre_id
 
-    results = data.get("results", [])[:limit]
-    return [_format_movie(m) for m in results]
+        url  = f"{TMDB_BASE}/discover/movie?" + urllib.parse.urlencode(params)
+        data = http_get(url)
+        if not data:
+            break
+
+        page_results = data.get("results", [])
+        if not page_results:
+            break
+
+        results.extend(page_results)
+        total_pages = data.get("total_pages", 1)
+        if page >= total_pages:
+            break
+        page += 1
+
+    return [_format_movie(m) for m in results[:limit]]
 
 
 def tmdb_search(api_key: str, query: str, year: int = None) -> list[dict]:
@@ -484,24 +504,34 @@ def tmdb_search(api_key: str, query: str, year: int = None) -> list[dict]:
     return [_format_movie(m) for m in data.get("results", [])[:15]]
 
 
-def tmdb_popular(api_key: str, page: int = 1) -> list[dict]:
-    """Top películas populares actuales."""
-    params = {"api_key": api_key, "language": "es-MX", "page": page}
-    url  = f"{TMDB_BASE}/movie/popular?" + urllib.parse.urlencode(params)
-    data = http_get(url)
-    if not data:
-        return []
-    return [_format_movie(m) for m in data.get("results", [])]
+def tmdb_popular(api_key: str, limit: int = 20) -> list[dict]:
+    """Top películas populares actuales. Pagina hasta alcanzar `limit`."""
+    results = []
+    page = 1
+    while len(results) < limit and page <= 5:
+        params = {"api_key": api_key, "language": "es-MX", "page": page}
+        url  = f"{TMDB_BASE}/movie/popular?" + urllib.parse.urlencode(params)
+        data = http_get(url)
+        if not data:
+            break
+        page_results = data.get("results", [])
+        if not page_results:
+            break
+        results.extend(page_results)
+        if page >= data.get("total_pages", 1):
+            break
+        page += 1
+    return [_format_movie(m) for m in results[:limit]]
 
 
-def tmdb_trending(api_key: str) -> list[dict]:
-    """Tendencias de la semana."""
+def tmdb_trending(api_key: str, limit: int = 20) -> list[dict]:
+    """Tendencias de la semana (TMDB devuelve una sola página de 20)."""
     params = {"api_key": api_key, "language": "es-MX"}
     url  = f"{TMDB_BASE}/trending/movie/week?" + urllib.parse.urlencode(params)
     data = http_get(url)
     if not data:
         return []
-    return [_format_movie(m) for m in data.get("results", [])]
+    return [_format_movie(m) for m in data.get("results", [])[:limit]]
 
 
 def _format_movie(m: dict) -> dict:

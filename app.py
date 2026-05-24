@@ -1753,7 +1753,7 @@ def page_peliculas():
     with tab_decadas:
         st.markdown("Descubre las **películas más populares** de cada época.")
 
-        col_d, col_g, col_lim = st.columns([2, 2, 1])
+        col_d, col_g = st.columns([2, 2])
         with col_d:
             decada_label = st.selectbox("📅 Época", [
                 "70s (1970–1979)", "80s (1980–1989)", "90s (1990–1999)",
@@ -1765,8 +1765,28 @@ def page_peliculas():
                 g.replace("_", " ").title() for g in GENRE_IDS
             ]
             genero_sel = st.selectbox("🎭 Género", generos_display, key="mov_genre")
+
+        col_ord, col_lim = st.columns([2, 1])
+        with col_ord:
+            orden_label = st.selectbox(
+                "🔀 Ordenar por",
+                ["🔥 Popularidad (mayor primero)",
+                 "📅 Año — más recientes primero",
+                 "📅 Año — más antiguos primero",
+                 "⭐ Calificación (mayor primero)"],
+                key="mov_sort",
+            )
         with col_lim:
-            limite = st.number_input("Películas", 5, 40, 15, 5, key="mov_limit")
+            limite = st.number_input("Nº películas", 10, 200, 40, 10, key="mov_limit")
+
+        # Mapear label → sort_by de TMDB
+        sort_map = {
+            "🔥 Popularidad (mayor primero)":      "popularity.desc",
+            "📅 Año — más recientes primero":       "primary_release_date.desc",
+            "📅 Año — más antiguos primero":        "primary_release_date.asc",
+            "⭐ Calificación (mayor primero)":      "vote_average.desc",
+        }
+        tmdb_sort = sort_map.get(orden_label, "popularity.desc")
 
         buscar_epoca = st.button("🚀 Explorar", type="primary",
                                  use_container_width=True, key="mov_explore_btn")
@@ -1776,11 +1796,12 @@ def page_peliculas():
             if genero_sel != "Todos los géneros":
                 genre_key = genero_sel.lower().replace(" ", "_")
 
-            with st.spinner("Consultando TMDB..."):
+            pages_needed = max(1, (limite + 19) // 20)   # cuántas páginas TMDB necesita
+            with st.spinner(f"Consultando TMDB ({pages_needed} página{'s' if pages_needed > 1 else ''})..."):
                 if decada_label == "Tendencias semana":
-                    movies = tmdb_trending(tmdb_key)[:limite]
+                    movies = tmdb_trending(tmdb_key, limit=limite)
                 elif decada_label == "Populares ahora":
-                    movies = tmdb_popular(tmdb_key)[:limite]
+                    movies = tmdb_popular(tmdb_key, limit=limite)
                 else:
                     decade_map = {
                         "70s (1970–1979)":  (1970, 1979),
@@ -1793,21 +1814,41 @@ def page_peliculas():
                     y_gte, y_lte = decade_map[decada_label]
                     genre_id = GENRE_IDS.get(genre_key) if genre_key else None
                     movies = tmdb_discover(tmdb_key, y_gte, y_lte,
-                                          genre_id=genre_id, limit=limite)
+                                          genre_id=genre_id, limit=limite,
+                                          sort_by=tmdb_sort)
 
             if not movies:
                 st.warning("Sin resultados. Prueba con otro filtro.")
             else:
                 st.success(f"✅ {len(movies)} películas encontradas")
                 st.session_state["mov_epoch_results"] = movies
+                st.session_state["mov_epoch_sort"]    = orden_label   # para mostrar en header
 
         # Muestra resultados guardados en session
         movies = st.session_state.get("mov_epoch_results", [])
         if movies:
+            active_sort = st.session_state.get("mov_epoch_sort", "")
+            sort_label  = active_sort.split(" ", 1)[1] if active_sort else ""
+            sort_html   = (f'<span>· ordenadas por <b style="color:#e2e2f0;">'
+                           f'{sort_label}</b></span>') if sort_label else ""
+            st.markdown(
+                f'<div style="display:flex;align-items:center;gap:12px;'
+                f'margin-bottom:10px;font-size:0.82rem;color:#8888b0;">'
+                f'<span>📋 <b style="color:#c4b5fd;">{len(movies)}</b> películas</span>'
+                f'{sort_html}'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
             for i, movie in enumerate(movies):
+                # Emoji de rating + año destacado en el título del expander
+                rating      = movie["rating"]
+                rating_icon = "🏆" if rating >= 8 else ("⭐" if rating >= 7 else "🎬")
+                votes_k     = f"{movie['votes']//1000}k" if movie['votes'] >= 1000 else str(movie['votes'])
+
                 with st.expander(
-                    f"{'⭐' if movie['rating'] >= 7 else '🎬'} "
-                    f"{movie['title']} ({movie['year']})  ·  ⭐ {movie['rating']}",
+                    f"{rating_icon} {movie['title']}  "
+                    f"({movie['year']})  ·  ⭐ {rating}  ·  👥 {votes_k} votos",
                     expanded=False,
                 ):
                     _render_movie_card(movie, compact=True)
@@ -1823,7 +1864,7 @@ def page_peliculas():
                         st.session_state[f"good_{key}"] = good_t
                         st.session_state[f"blocked_{key}"] = blocked_t
 
-                    good_t = st.session_state.get(f"good_{key}")
+                    good_t    = st.session_state.get(f"good_{key}")
                     blocked_t = st.session_state.get(f"blocked_{key}")
                     if good_t is not None or blocked_t is not None:
                         _render_torrents(good_t or [], blocked_t or [], movie, movies_dir,
