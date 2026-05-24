@@ -104,6 +104,27 @@ def output_files_section(folder, extensions=None):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Helper compartido: cabecera de página
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _page_header(icon: str, title: str, subtitle: str = ""):
+    """Renderiza un header consistente arriba de cada página."""
+    sub_html = (f'<div class="mh-page-header-sub">{subtitle}</div>'
+                if subtitle else "")
+    st.markdown(
+        f'<div class="mh-page-header">'
+        f'  <div class="mh-page-header-icon">{icon}</div>'
+        f'  <div class="mh-page-header-text">'
+        f'    <div class="mh-breadcrumb">MediaHub &rsaquo; {title}</div>'
+        f'    <div class="mh-page-header-title">{title}</div>'
+        f'    {sub_html}'
+        f'  </div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Páginas
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -113,152 +134,169 @@ def page_inicio():
     # ── Hero ─────────────────────────────────────────────────────────────────
     st.markdown("""
     <div class="mh-hero">
-        <div style="font-size:2.6rem;font-weight:900;background:linear-gradient(135deg,#a78bfa,#60a5fa,#34d399);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;margin-bottom:8px;">
-            🎵 MediaHub
+        <div style="font-size:2.8rem;font-weight:900;
+             background:linear-gradient(135deg,#a78bfa,#60a5fa,#34d399);
+             -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+             background-clip:text;margin-bottom:10px;line-height:1.1;">
+            🎬 MediaHub
         </div>
-        <div style="color:#8888b0;font-size:1.05rem;max-width:560px;line-height:1.7;">
-            Tu biblioteca de música, películas y ebooks, <strong style="color:#c4b5fd;">completamente local</strong> y sin suscripciones.
-            Descarga, organiza y exporta — todo desde tu máquina.
+        <div style="color:#8888b0;font-size:1rem;max-width:580px;line-height:1.75;">
+            Tu biblioteca de <strong style="color:#c4b5fd;">música</strong>,
+            <strong style="color:#60a5fa;">películas</strong> y
+            <strong style="color:#34d399;">ebooks</strong>,
+            completamente local y sin suscripciones.<br>
+            Descarga, organiza y limpia — todo desde tu máquina.
         </div>
-        <div style="margin-top:18px;display:flex;gap:10px;flex-wrap:wrap;">
+        <div style="margin-top:16px;display:flex;gap:8px;flex-wrap:wrap;">
             <span class="mh-badge mh-badge-purple">🔒 100% Local</span>
             <span class="mh-badge mh-badge-blue">🎵 Last.fm + TPB</span>
-            <span class="mh-badge mh-badge-green">🎬 Películas Latino</span>
+            <span class="mh-badge mh-badge-green">🎬 Películas Latino MX</span>
             <span class="mh-badge mh-badge-yellow">🔧 Fix Metadata</span>
+            <span class="mh-badge mh-badge-red">📚 Kindle Ready</span>
         </div>
     </div>
     """, unsafe_allow_html=True)
 
-    # ── Métricas rápidas ──────────────────────────────────────────────────────
-    music_count = len(list(Path(cfg["music_folder"]).rglob("*.mp3"))) if Path(cfg["music_folder"]).exists() else 0
+    # ── Barra de estadísticas ─────────────────────────────────────────────────
+    music_folder = Path(cfg.get("music_folder", ""))
+    music_count  = len(list(music_folder.rglob("*.mp3"))) if music_folder.exists() else 0
+    music_gb     = sum(f.stat().st_size for f in music_folder.rglob("*.mp3")) / 1e9 \
+                   if music_folder.exists() and music_count > 0 else 0
+
     t_music  = BASE_DIR / "output" / "torrents"
     t_ebooks = BASE_DIR / "output_ebooks" / "torrents"
-    n_torrents_music  = len(list(t_music.glob("*.torrent")))  if t_music.exists()  else 0
-    n_torrents_ebooks = len(list(t_ebooks.glob("*.torrent"))) if t_ebooks.exists() else 0
+    n_t_music  = len(list(t_music.glob("*.torrent")))  if t_music.exists()  else 0
+    n_t_ebooks = len(list(t_ebooks.glob("*.torrent"))) if t_ebooks.exists() else 0
 
-    col_a, col_b, col_c = st.columns(3)
-    with col_a:
-        st.metric("🎵 MP3s en biblioteca", f"{music_count:,}")
-    with col_b:
-        st.metric("🎵 Torrents música", n_torrents_music)
-    with col_c:
-        st.metric("📚 Torrents ebooks", n_torrents_ebooks)
+    mag_movies = Path(cfg.get("movies_folder", "")) / "magnets_movies.txt"
+    n_magnets  = sum(1 for l in mag_movies.read_text(encoding="utf-8").splitlines()
+                     if l.startswith("magnet:")) if mag_movies.exists() else 0
 
-    st.markdown('<div class="mh-section-title">Módulos disponibles</div>', unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="mh-stats-bar">'
+        f'  <div class="mh-stat-item">'
+        f'    <div class="mh-stat-item-val">{music_count:,}</div>'
+        f'    <div class="mh-stat-item-lbl">🎵 MP3s</div>'
+        f'  </div>'
+        f'  <div class="mh-stat-divider"></div>'
+        f'  <div class="mh-stat-item">'
+        f'    <div class="mh-stat-item-val">{music_gb:.1f} GB</div>'
+        f'    <div class="mh-stat-item-lbl">💾 Música</div>'
+        f'  </div>'
+        f'  <div class="mh-stat-divider"></div>'
+        f'  <div class="mh-stat-item">'
+        f'    <div class="mh-stat-item-val">{n_t_music}</div>'
+        f'    <div class="mh-stat-item-lbl">📦 Torrents música</div>'
+        f'  </div>'
+        f'  <div class="mh-stat-divider"></div>'
+        f'  <div class="mh-stat-item">'
+        f'    <div class="mh-stat-item-val">{n_magnets}</div>'
+        f'    <div class="mh-stat-item-lbl">🎬 Magnets guardados</div>'
+        f'  </div>'
+        f'  <div class="mh-stat-divider"></div>'
+        f'  <div class="mh-stat-item">'
+        f'    <div class="mh-stat-item-val">{n_t_ebooks}</div>'
+        f'    <div class="mh-stat-item-lbl">📚 Torrents ebooks</div>'
+        f'  </div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
 
-    # ── Tarjetas de módulos ───────────────────────────────────────────────────
-    col1, col2, col3 = st.columns(3)
+    # ── Sección DESCARGA ──────────────────────────────────────────────────────
+    st.markdown('<div class="mh-section-title">📥  Descarga de contenido</div>',
+                unsafe_allow_html=True)
 
-    with col1:
-        st.markdown("""
-        <div class="mh-card">
-            <span class="mh-card-icon">🎵</span>
-            <div class="mh-card-title">Música</div>
-            <div class="mh-card-desc">
-                Obtiene el top de canciones de <strong>Last.fm</strong> por género
-                y descarga torrents MP3 desde The Pirate Bay.
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-        if st.button("Ir a Música →", use_container_width=True, key="home_musica"):
-            st.session_state.page = "🎵 Música"
+    col1, col2, col3, col4 = st.columns(4)
+
+    _DOWNLOAD_CARDS = [
+        ("🎵", "Música", "dl",
+         "Obtiene el top de canciones de <b>Last.fm</b> por género y busca torrents MP3 en The Pirate Bay.",
+         "🎵 Música"),
+        ("🎬", "Películas", "dl",
+         "Explora por década o búsqueda vía <b>TMDB</b>. Torrents en español <b>latino MX</b>, filtro CAM/TS.",
+         "🎬 Películas"),
+        ("📚", "Ebooks", "dl",
+         "Lista los libros más leídos y descarga archivos <b>.torrent</b> compatibles con Kindle.",
+         "📚 Ebooks"),
+        ("🟢", "Mi Spotify", "dl",
+         "Importa tu historial de Spotify y busca torrents de tus <b>artistas más escuchados</b>.",
+         "🟢 Mi Spotify"),
+    ]
+
+    for col, (icon, title, tag, desc, page_key) in zip(
+            [col1, col2, col3, col4], _DOWNLOAD_CARDS):
+        with col:
+            st.markdown(
+                f'<div class="mh-module-card">'
+                f'  <span class="mh-mc-icon">{icon}</span>'
+                f'  <span class="mh-mc-tag mh-mc-tag-dl">Descarga</span>'
+                f'  <div class="mh-mc-title">{title}</div>'
+                f'  <div class="mh-mc-desc">{desc}</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+            if st.button(f"Abrir {title}", use_container_width=True,
+                         key=f"home_{page_key}", type="primary"):
+                st.session_state.page = page_key
+                st.rerun()
+
+    # ── Sección BIBLIOTECA ────────────────────────────────────────────────────
+    st.markdown('<div class="mh-section-title">🗂  Gestión de biblioteca</div>',
+                unsafe_allow_html=True)
+
+    col5, col6, col7 = st.columns(3)
+
+    _LIB_CARDS = [
+        ("🔧", "Fix Metadata", "lib",
+         "Completa los tags ID3 de tus MP3s — artista, álbum, año, género y portada — con MusicBrainz.",
+         "🔧 Fix Metadata"),
+        ("🧹", "Limpiar duplicados", "lib",
+         "Detecta y borra duplicados <b>directamente en tu biblioteca</b>, liberando espacio al instante.",
+         "🧹 Limpiar duplicados"),
+        ("📊", "Explorador", "lib",
+         "Visualiza qué carpetas ocupan más espacio, navega nivel a nivel y detecta el peso de tu colección.",
+         "📊 Explorador"),
+    ]
+
+    for col, (icon, title, tag, desc, page_key) in zip(
+            [col5, col6, col7], _LIB_CARDS):
+        with col:
+            st.markdown(
+                f'<div class="mh-module-card mh-card-highlight">'
+                f'  <span class="mh-mc-icon">{icon}</span>'
+                f'  <span class="mh-mc-tag mh-mc-tag-lib">Biblioteca</span>'
+                f'  <div class="mh-mc-title">{title}</div>'
+                f'  <div class="mh-mc-desc">{desc}</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+            if st.button(f"Abrir {title}", use_container_width=True,
+                         key=f"home_{page_key}"):
+                st.session_state.page = page_key
+                st.rerun()
+
+    # ── Accesos rápidos ───────────────────────────────────────────────────────
+    st.markdown('<div class="mh-section-title">⚡  Acceso rápido</div>',
+                unsafe_allow_html=True)
+    qa1, qa2, qa3 = st.columns(3)
+    with qa1:
+        if st.button("⚙️  Configuración  →", use_container_width=True,
+                     key="home_cfg"):
+            st.session_state.page = "⚙️ Configuración"
             st.rerun()
-
-    with col2:
-        st.markdown("""
-        <div class="mh-card">
-            <span class="mh-card-icon">🎬</span>
-            <div class="mh-card-title">Películas</div>
-            <div class="mh-card-desc">
-                Explora películas de los 70s hasta hoy vía <strong>TMDB</strong>,
-                encuentra torrents en español <strong>latino</strong> y filtra calidad CAM/TS.
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-        if st.button("Ir a Películas →", use_container_width=True, key="home_movies"):
-            st.session_state.page = "🎬 Películas"
+    with qa2:
+        if st.button("📖  Documentación  →", use_container_width=True,
+                     key="home_help"):
+            st.session_state.page = "📖 Ayuda"
             st.rerun()
-
-    with col3:
-        st.markdown("""
-        <div class="mh-card">
-            <span class="mh-card-icon">📚</span>
-            <div class="mh-card-title">Ebooks</div>
-            <div class="mh-card-desc">
-                Lista los libros más leídos en inglés y español
-                y descarga ficheros <strong>.torrent</strong> para Kindle.
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-        if st.button("Ir a Ebooks →", use_container_width=True, key="home_ebooks"):
-            st.session_state.page = "📚 Ebooks"
-            st.rerun()
-
-    with col3:
-        st.markdown("""
-        <div class="mh-card">
-            <span class="mh-card-icon">🟢</span>
-            <div class="mh-card-title">Mi Spotify</div>
-            <div class="mh-card-desc">
-                Procesa tu historial personal de Spotify y busca
-                los torrents de tus artistas más escuchados.
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-        if st.button("Ir a Mi Spotify →", use_container_width=True, key="home_spotify"):
-            st.session_state.page = "🟢 Mi Spotify"
-            st.rerun()
-
-    col4, col5, col6 = st.columns(3)
-
-    with col4:
-        st.markdown("""
-        <div class="mh-card">
-            <span class="mh-card-icon">🔧</span>
-            <div class="mh-card-title">Fix Metadata</div>
-            <div class="mh-card-desc">
-                Completa los tags ID3 de tus MP3s — artista, álbum,
-                año, género y portada — automáticamente.
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-        if st.button("Ir a Fix Metadata →", use_container_width=True, key="home_meta"):
-            st.session_state.page = "🔧 Fix Metadata"
-            st.rerun()
-
-    with col5:
-        st.markdown("""
-        <div class="mh-card">
-            <span class="mh-card-icon">🧹</span>
-            <div class="mh-card-title">Limpiar duplicados</div>
-            <div class="mh-card-desc">
-                Detecta y borra los duplicados <strong>directamente en tu biblioteca</strong>,
-                liberando espacio sin crear carpetas extra.
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-        if st.button("Ir a Limpiar →", use_container_width=True, key="home_phone"):
-            st.session_state.page = "🧹 Limpiar duplicados"
-            st.rerun()
-
-    with col6:
-        st.markdown("""
-        <div class="mh-card">
-            <span class="mh-card-icon">📊</span>
-            <div class="mh-card-title">Explorador</div>
-            <div class="mh-card-desc">
-                Visualiza qué carpetas ocupan más espacio, navega nivel a nivel
-                y detecta dónde está el peso de tu biblioteca.
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-        if st.button("Ir a Explorador →", use_container_width=True, key="home_exp"):
-            st.session_state.page = "📊 Explorador"
-            st.rerun()
+    with qa3:
+        tmdb_ok = bool(cfg.get("tmdb_api_key", "").strip())
+        if not tmdb_ok:
+            st.warning("⚠️ TMDB API key no configurada — Películas no funcionará hasta configurarla.")
 
 
 def page_musica():
-    st.title("🎵 Música — Last.fm → The Pirate Bay")
+    _page_header("🎵", "Música", "Descarga MP3s · Last.fm + The Pirate Bay")
     cfg = load_config()
 
     with st.expander("⚙️ Opciones", expanded=False):
@@ -583,7 +621,7 @@ def page_musica():
 
 
 def page_ebooks():
-    st.title("📚 Ebooks — Libros para Kindle")
+    _page_header("📚", "Ebooks", "Descarga libros compatibles con Kindle")
     cfg = load_config()
 
     # ── Helpers compartidos ───────────────────────────────────────────────────
@@ -843,7 +881,7 @@ def page_ebooks():
 
 
 def page_metadata():
-    st.title("🔧 Fix Metadata — MP3s")
+    _page_header("🔧", "Fix Metadata", "Corrige tags ID3 de tus MP3s automáticamente")
     cfg = load_config()
 
     col1, col2 = st.columns([2, 1])
@@ -940,7 +978,7 @@ def page_metadata():
 
 
 def page_spotify():
-    st.title("🟢 Spotify — Tu historial personal")
+    _page_header("🟢", "Mi Spotify", "Torrents de tus artistas más escuchados")
     cfg = load_config()
 
     st.markdown(
@@ -989,7 +1027,7 @@ def page_spotify():
 
 
 def page_phone():
-    st.title("🧹 Limpiar duplicados")
+    _page_header("🧹", "Limpiar duplicados", "Elimina MP3s repetidos directamente en tu biblioteca")
     cfg = load_config()
 
     source_folder = st.text_input("📁 Carpeta de música (tus MP3s)", value=cfg["music_folder"])
@@ -1251,8 +1289,7 @@ def page_phone():
 
 
 def page_ayuda():
-    st.title("📖 Documentación — MediaHub")
-    st.markdown("Guía completa de cada sección de la aplicación.")
+    _page_header("📖", "Ayuda", "Guía completa de cada sección de la aplicación")
 
     # ── Inicio ────────────────────────────────────────────────────────────────
     with st.expander("🏠 Inicio", expanded=False):
@@ -1557,7 +1594,7 @@ Puedes obtener una gratis en [last.fm/api](https://www.last.fm/api/account/creat
 
 
 def page_config():
-    st.title("⚙️ Configuración")
+    _page_header("⚙️", "Configuración", "API keys, rutas y preferencias globales")
     cfg = load_config()
 
     st.markdown("### 🔑 APIs")
@@ -1640,7 +1677,7 @@ def page_config():
 def page_peliculas():
     import urllib.request, urllib.parse, json as _json, re as _re, time as _time
 
-    st.title("🎬 Películas")
+    _page_header("🎬", "Películas", "Descarga en español latino · TMDB + The Pirate Bay + YTS")
     cfg = load_config()
 
     # ── Importar helpers del script ───────────────────────────────────────────
@@ -2193,7 +2230,7 @@ def _render_torrents(good_torrents: list, blocked_torrents: list,
 def page_explorador():
     import os
 
-    st.title("📊 Explorador de carpetas")
+    _page_header("📊", "Explorador de carpetas", "Visualiza el uso de disco por carpeta · navega nivel a nivel")
     cfg = load_config()
 
     # ── Selector de carpeta raíz ──────────────────────────────────────────────
@@ -2800,51 +2837,221 @@ hr {
     color: #5555a0;
     margin: 24px 0 12px;
 }
+
+/* ═══════════════════════════════════════════════
+   SIDEBAR — GRUPOS Y ELEMENTOS NUEVOS
+═══════════════════════════════════════════════ */
+.mh-nav-divider {
+    height: 1px;
+    background: linear-gradient(90deg, rgba(120,80,255,0.4), transparent);
+    margin: 10px 0 14px;
+}
+.mh-nav-group-label {
+    font-size: 0.62rem;
+    font-weight: 800;
+    letter-spacing: 1.8px;
+    text-transform: uppercase;
+    color: #44448a !important;
+    padding: 10px 4px 4px;
+    margin-bottom: 2px;
+}
+.mh-nav-hint {
+    font-size: 0.7rem;
+    color: #5555a0 !important;
+    padding: 0px 6px 6px;
+    margin-top: -4px;
+    line-height: 1.4;
+}
+
+/* Status pills en footer sidebar */
+.mh-status-pill {
+    font-size: 0.62rem;
+    font-weight: 700;
+    letter-spacing: 0.8px;
+    padding: 2px 8px;
+    border-radius: 20px;
+    text-transform: uppercase;
+}
+.mh-pill-ok {
+    background: rgba(52,211,153,0.15);
+    color: #6ee7b7 !important;
+    border: 1px solid rgba(52,211,153,0.3);
+}
+.mh-pill-off {
+    background: rgba(100,100,120,0.15);
+    color: #55558a !important;
+    border: 1px solid rgba(100,100,120,0.2);
+}
+
+/* ═══════════════════════════════════════════════
+   PAGE HEADER COMPONENT
+═══════════════════════════════════════════════ */
+.mh-page-header {
+    display: flex;
+    align-items: flex-start;
+    gap: 16px;
+    padding: 24px 28px;
+    margin-bottom: 24px;
+    background: linear-gradient(135deg,
+        rgba(120,80,255,0.12) 0%,
+        rgba(59,130,246,0.08) 60%,
+        rgba(52,211,153,0.06) 100%);
+    border: 1px solid rgba(120,80,255,0.2);
+    border-radius: 18px;
+    position: relative;
+    overflow: hidden;
+}
+.mh-page-header::after {
+    content: "";
+    position: absolute;
+    top: -40px; right: -40px;
+    width: 140px; height: 140px;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(120,80,255,0.12), transparent 70%);
+    pointer-events: none;
+}
+.mh-page-header-icon {
+    font-size: 2.4rem;
+    line-height: 1;
+    flex-shrink: 0;
+}
+.mh-page-header-text {}
+.mh-page-header-title {
+    font-size: 1.6rem;
+    font-weight: 900;
+    background: linear-gradient(135deg, #a78bfa, #60a5fa);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    line-height: 1.2;
+    margin-bottom: 4px;
+}
+.mh-page-header-sub {
+    font-size: 0.85rem;
+    color: #6666a0 !important;
+    line-height: 1.5;
+}
+.mh-breadcrumb {
+    font-size: 0.72rem;
+    color: #44448a !important;
+    margin-bottom: 6px;
+    letter-spacing: 0.3px;
+}
+
+/* ═══════════════════════════════════════════════
+   HOME — MÓDULO CARDS MEJORADAS
+═══════════════════════════════════════════════ */
+.mh-module-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 14px;
+    margin-bottom: 24px;
+}
+.mh-module-card {
+    background: linear-gradient(135deg,
+        rgba(120,80,255,0.1) 0%,
+        rgba(168,85,247,0.06) 100%);
+    border: 1px solid rgba(120,80,255,0.22);
+    border-radius: 16px;
+    padding: 20px 18px 16px;
+    transition: all 0.25s ease;
+    cursor: default;
+}
+.mh-module-card:hover {
+    border-color: rgba(120,80,255,0.5);
+    background: linear-gradient(135deg,
+        rgba(120,80,255,0.18) 0%,
+        rgba(168,85,247,0.12) 100%);
+    box-shadow: 0 8px 28px rgba(120,80,255,0.18);
+    transform: translateY(-2px);
+}
+.mh-module-card.mh-card-highlight {
+    border-color: rgba(52,211,153,0.35);
+    background: linear-gradient(135deg,
+        rgba(52,211,153,0.08) 0%,
+        rgba(120,80,255,0.06) 100%);
+}
+.mh-module-card.mh-card-highlight:hover {
+    border-color: rgba(52,211,153,0.6);
+    box-shadow: 0 8px 28px rgba(52,211,153,0.15);
+}
+.mh-mc-icon { font-size: 1.9rem; margin-bottom: 10px; display: block; }
+.mh-mc-tag {
+    display: inline-block;
+    font-size: 0.6rem;
+    font-weight: 700;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    padding: 2px 7px;
+    border-radius: 4px;
+    margin-bottom: 8px;
+}
+.mh-mc-tag-dl  { background: rgba(96,165,250,0.2);  color: #93c5fd; }
+.mh-mc-tag-lib { background: rgba(251,191,36,0.2);  color: #fcd34d; }
+.mh-mc-title { color: #c4b5fd !important; font-size: 1.05rem; font-weight: 700; margin-bottom: 5px; }
+.mh-mc-desc  { color: #7070a0 !important; font-size: 0.82rem; line-height: 1.55; }
+
+/* ═══════════════════════════════════════════════
+   HOME — STATS BAR
+═══════════════════════════════════════════════ */
+.mh-stats-bar {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    padding: 14px 20px;
+    background: rgba(255,255,255,0.025);
+    border: 1px solid rgba(120,80,255,0.15);
+    border-radius: 14px;
+    margin-bottom: 24px;
+    align-items: center;
+}
+.mh-stat-item { text-align: center; flex: 1; min-width: 80px; }
+.mh-stat-item-val {
+    font-size: 1.5rem;
+    font-weight: 900;
+    background: linear-gradient(135deg,#a78bfa,#60a5fa);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+.mh-stat-item-lbl { font-size: 0.7rem; color: #55558a !important; margin-top: 2px; }
+.mh-stat-divider {
+    width: 1px; height: 36px;
+    background: rgba(120,80,255,0.2);
+    flex-shrink: 0;
+}
 </style>
 """, unsafe_allow_html=True)
 
-# Navegación sidebar
+# ─────────────────────────────────────────────────────────────────────────────
+# Navegación sidebar — agrupada por categoría
+# ─────────────────────────────────────────────────────────────────────────────
+
 if "page" not in st.session_state:
     st.session_state.page = "🏠 Inicio"
 
-with st.sidebar:
-    st.markdown("""
-    <div style="padding:16px 8px 4px;margin-bottom:4px;">
-        <div style="font-size:1.55rem;font-weight:900;background:linear-gradient(135deg,#a78bfa,#60a5fa);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;">
-            🎵 MediaHub
-        </div>
-        <div style="font-size:0.72rem;color:#44448a;letter-spacing:0.5px;margin-top:2px;">
-            Tu música · Local · Sin suscripciones
-        </div>
-    </div>
-    <div style="height:1px;background:linear-gradient(90deg,rgba(120,80,255,0.4),transparent);margin:8px 0 16px;"></div>
-    """, unsafe_allow_html=True)
+# Grupos de navegación
+NAV_GROUPS = [
+    {
+        "label": None,
+        "pages": ["🏠 Inicio"],
+    },
+    {
+        "label": "📥  DESCARGA",
+        "pages": ["🎵 Música", "🎬 Películas", "📚 Ebooks", "🟢 Mi Spotify"],
+    },
+    {
+        "label": "🗂  BIBLIOTECA",
+        "pages": ["🔧 Fix Metadata", "🧹 Limpiar duplicados", "📊 Explorador"],
+    },
+    {
+        "label": "⚙  SISTEMA",
+        "pages": ["⚙️ Configuración", "📖 Ayuda"],
+    },
+]
 
-    pages = [
-        ("🏠 Inicio",            "🏠"),
-        ("🎵 Música",            "🎵"),
-        ("🎬 Películas",         "🎬"),
-        ("📚 Ebooks",            "📚"),
-        ("🟢 Mi Spotify",        "🟢"),
-        ("🔧 Fix Metadata",      "🔧"),
-        ("🧹 Limpiar duplicados","🧹"),
-        ("📊 Explorador",        "📊"),
-        ("⚙️ Configuración",     "⚙️"),
-        ("📖 Ayuda",             "📖"),
-    ]
-    for p, _ in pages:
-        if st.button(p, use_container_width=True, key=f"nav_{p}",
-                     type="primary" if st.session_state.page == p else "secondary"):
-            st.session_state.page = p
-            st.rerun()
-
-    st.markdown("""
-    <div style="height:1px;background:linear-gradient(90deg,rgba(120,80,255,0.4),transparent);margin:16px 0 12px;"></div>
-    <div style="font-size:0.7rem;color:#33335a;text-align:center;">v1.0 · MediaHub · MIT</div>
-    """, unsafe_allow_html=True)
-
-# Renderiza la página activa
-{
+# Mapa página → función
+PAGE_MAP = {
     "🏠 Inicio":             page_inicio,
     "🎵 Música":             page_musica,
     "🎬 Películas":          page_peliculas,
@@ -2855,4 +3062,94 @@ with st.sidebar:
     "📊 Explorador":         page_explorador,
     "⚙️ Configuración":      page_config,
     "📖 Ayuda":              page_ayuda,
-}[st.session_state.page]()
+}
+
+# Mapa página → descripción corta (tooltip en sidebar)
+PAGE_HINTS = {
+    "🏠 Inicio":             "Panel principal",
+    "🎵 Música":             "Last.fm + The Pirate Bay",
+    "🎬 Películas":          "TMDB + TPB + YTS · Latino",
+    "📚 Ebooks":             "Libros para Kindle",
+    "🟢 Mi Spotify":         "Tu historial personal",
+    "🔧 Fix Metadata":       "Corrige tags ID3 de MP3s",
+    "🧹 Limpiar duplicados": "Elimina MP3s repetidos",
+    "📊 Explorador":         "Espacio por carpeta",
+    "⚙️ Configuración":      "API keys y rutas",
+    "📖 Ayuda":              "Documentación",
+}
+
+with st.sidebar:
+    # ── Logo ─────────────────────────────────────────────────────────────────
+    st.markdown("""
+    <div style="padding:20px 4px 8px;">
+        <div style="font-size:1.65rem;font-weight:900;
+             background:linear-gradient(135deg,#a78bfa,#60a5fa,#34d399);
+             -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+             background-clip:text;line-height:1.1;">
+            🎬 MediaHub
+        </div>
+        <div style="font-size:0.7rem;color:#44448a;letter-spacing:0.8px;
+             margin-top:4px;text-transform:uppercase;">
+            Música · Películas · Ebooks
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown('<div class="mh-nav-divider"></div>', unsafe_allow_html=True)
+
+    # ── Grupos de navegación ──────────────────────────────────────────────────
+    current = st.session_state.page
+    for group in NAV_GROUPS:
+        if group["label"]:
+            st.markdown(
+                f'<div class="mh-nav-group-label">{group["label"]}</div>',
+                unsafe_allow_html=True,
+            )
+        for page_name in group["pages"]:
+            is_active = current == page_name
+            hint      = PAGE_HINTS.get(page_name, "")
+            # Inyectar descripción debajo del nombre cuando está activa
+            label = page_name
+            if st.button(
+                label,
+                use_container_width=True,
+                key=f"nav_{page_name}",
+                type="primary" if is_active else "secondary",
+                help=hint,
+            ):
+                st.session_state.page = page_name
+                st.rerun()
+            # Sub-descripción solo en ítem activo
+            if is_active:
+                st.markdown(
+                    f'<div class="mh-nav-hint">{hint}</div>',
+                    unsafe_allow_html=True,
+                )
+        if group["label"]:
+            st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
+
+    # ── Footer sidebar ────────────────────────────────────────────────────────
+    st.markdown('<div class="mh-nav-divider" style="margin-top:8px;"></div>',
+                unsafe_allow_html=True)
+
+    # Config status pill
+    cfg = load_config()
+    tmdb_ok = bool(cfg.get("tmdb_api_key", "").strip())
+    sp_ok   = bool(cfg.get("spotify_client_id", "").strip())
+    st.markdown(
+        f'<div style="display:flex;gap:6px;flex-wrap:wrap;padding:4px 0 8px;">'
+        f'<span class="mh-status-pill {"mh-pill-ok" if tmdb_ok else "mh-pill-off"}">TMDB</span>'
+        f'<span class="mh-status-pill {"mh-pill-ok" if sp_ok   else "mh-pill-off"}">Spotify</span>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        '<div style="font-size:0.68rem;color:#33335a;text-align:center;padding-bottom:8px;">'
+        'v1.2 · MediaHub · MIT License</div>',
+        unsafe_allow_html=True,
+    )
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Renderiza la página activa
+# ─────────────────────────────────────────────────────────────────────────────
+PAGE_MAP[st.session_state.page]()
