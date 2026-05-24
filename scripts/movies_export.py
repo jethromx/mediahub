@@ -125,7 +125,7 @@ def quality_score(name: str) -> tuple[int, str]:
     # Detectar resolución
     res = ""
     if "2160p" in name_l or "4k" in name_l:
-        res = "4K"
+        res = "4K · 2160p"
     elif "1080p" in name_l:
         res = "1080p"
     elif "720p" in name_l:
@@ -133,18 +133,34 @@ def quality_score(name: str) -> tuple[int, str]:
     elif "480p" in name_l:
         res = "480p"
 
-    score = 0
-    label_parts = []
+    # Detectar codec de video
+    codec = ""
+    if "av1" in name_l:
+        codec = "AV1"
+    elif "x265" in name_l or "h.265" in name_l or "h265" in name_l or "hevc" in name_l:
+        codec = "x265/HEVC"
+    elif "x264" in name_l or "h.264" in name_l or "h264" in name_l or "avc" in name_l:
+        codec = "x264"
 
+    # Detectar fuente
+    score = 0
+    source_label = ""
     for kw, pts in QUALITY_RANK.items():
         if kw in name_l:
-            score = max(score, pts)
-            label_parts.append(kw.upper())
+            if pts > score:
+                score = pts
+                source_label = kw.upper()
 
+    # Construir label estructurado
+    parts = []
     if res:
-        label_parts.insert(0, res)
+        parts.append(res)
+    if source_label:
+        parts.append(source_label)
+    if codec:
+        parts.append(codec)
 
-    label = " · ".join(label_parts[:3]) or "SD"
+    label = " · ".join(parts) or "SD"
     return score, label
 
 
@@ -168,6 +184,61 @@ def spanish_score(name: str) -> int:
     return 0
 
 
+def extract_format(name: str) -> dict:
+    """Extrae resolución, codec y fuente del nombre del torrent."""
+    name_l = name.lower()
+
+    # Resolución
+    if "2160p" in name_l or "4k" in name_l:
+        res = "4K"
+    elif "1080p" in name_l:
+        res = "1080p"
+    elif "720p" in name_l:
+        res = "720p"
+    elif "480p" in name_l:
+        res = "480p"
+    else:
+        res = "SD"
+
+    # Codec de video
+    if "av1" in name_l:
+        codec = "AV1"
+    elif "x265" in name_l or "h.265" in name_l or "h265" in name_l or "hevc" in name_l:
+        codec = "x265"
+    elif "x264" in name_l or "h.264" in name_l or "h264" in name_l or "avc" in name_l:
+        codec = "x264"
+    else:
+        codec = ""
+
+    # Codec de audio
+    if "truehd" in name_l or "atmos" in name_l:
+        audio = "TrueHD/Atmos"
+    elif "dts-hd" in name_l or "dtshd" in name_l:
+        audio = "DTS-HD"
+    elif "dts" in name_l:
+        audio = "DTS"
+    elif "dd+" in name_l or "ddp" in name_l or "eac3" in name_l or "e-ac" in name_l:
+        audio = "DD+"
+    elif "aac" in name_l:
+        audio = "AAC"
+    elif "ac3" in name_l or "dd5" in name_l or "dolby" in name_l:
+        audio = "Dolby"
+    elif "mp3" in name_l:
+        audio = "MP3"
+    else:
+        audio = ""
+
+    # Fuente (mejor coincidencia)
+    src = ""
+    src_score = 0
+    for kw, pts in QUALITY_RANK.items():
+        if kw in name_l and pts > src_score:
+            src_score = pts
+            src = kw.upper()
+
+    return {"res": res, "codec": codec, "audio": audio, "src": src}
+
+
 def classify_torrent(r: dict) -> dict:
     name    = r.get("name", "")
     seeds   = int(r.get("seeders", 0))
@@ -177,6 +248,7 @@ def classify_torrent(r: dict) -> dict:
 
     q_score, q_label = quality_score(name)
     s_score          = spanish_score(name)
+    fmt              = extract_format(name)
 
     # Ícono de semillas
     if seeds >= 30:   seed_icon = "🟢"
@@ -204,6 +276,11 @@ def classify_torrent(r: dict) -> dict:
         "seed_icon":  seed_icon,
         "lang_icon":  lang_icon,
         "blocked":    q_score == -1,
+        # Campos de formato desglosados
+        "res":        fmt["res"],
+        "codec":      fmt["codec"],
+        "audio":      fmt["audio"],
+        "src":        fmt["src"],
     }
 
 
@@ -261,6 +338,9 @@ def yts_search(title: str, year: str = None) -> list[dict]:
             elif seeds >= 1:  seed_icon = "🔴"
             else:             seed_icon = "⚫"
 
+            # Resolución normalizada para YTS
+            res_clean = "4K" if quality == "2160p" else quality  # "1080p", "720p"
+
             results.append({
                 "name":       name,
                 "seeds":      seeds,
@@ -276,6 +356,11 @@ def yts_search(title: str, year: str = None) -> list[dict]:
                 "lang_icon":  "🔤 Subs externos",
                 "blocked":    False,
                 "source":     "YTS",
+                # Campos de formato desglosados (YTS los da explícitos)
+                "res":        res_clean,
+                "codec":      "",         # YTS no detalla codec en API
+                "audio":      "",
+                "src":        t_type.upper() if t_type else "YTS",
             })
 
     results.sort(key=lambda r: (r["q_score"], r["seeds"]), reverse=True)

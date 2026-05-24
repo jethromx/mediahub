@@ -2010,20 +2010,73 @@ def _render_torrents(good_torrents: list, blocked_torrents: list,
             col_meta, col_actions = st.columns([3, 3])
 
             with col_meta:
-                # Calidad en color según nivel
-                q = t.get("q_score", 0)
-                q_color = "#34d399" if q >= 8 else ("#60a5fa" if q >= 6 else "#f59e0b")
+                q      = t.get("q_score", 0)
+                res    = t.get("res", "")
+                codec  = t.get("codec", "")
+                audio  = t.get("audio", "")
+                src    = t.get("src", source)
+
+                # ── Pastilla de resolución ────────────────────────────────────
+                res_colors = {
+                    "4K":    ("linear-gradient(135deg,#7c3aed,#a855f7)", "#fff"),
+                    "1080p": ("linear-gradient(135deg,#1d4ed8,#3b82f6)", "#fff"),
+                    "720p":  ("linear-gradient(135deg,#0369a1,#38bdf8)", "#fff"),
+                    "480p":  ("rgba(80,80,100,0.5)",                     "#aaa"),
+                    "SD":    ("rgba(60,60,80,0.4)",                      "#888"),
+                }
+                res_bg, res_fg = res_colors.get(res, ("rgba(80,80,100,0.4)", "#aaa"))
+
+                # ── Pastilla de fuente (BluRay/WEB-DL/etc.) ───────────────────
+                src_colors = {
+                    "REMUX":  "#d97706", "BLURAY": "#7c3aed", "BLU-RAY": "#7c3aed",
+                    "WEB-DL": "#1d4ed8", "WEBDL":  "#1d4ed8", "WEBRIP": "#0369a1",
+                    "WEB":    "#0369a1", "AMZN":   "#f97316", "NFLX":   "#dc2626",
+                    "DSNP":   "#1e40af", "HDTV":   "#374151", "HDRIP":  "#374151",
+                    "DVDRIP": "#6b7280", "YTS":    "#d97706",
+                }
+                src_clr = src_colors.get(src.upper(), "#4b5563")
+
+                # ── Pastilla de codec ─────────────────────────────────────────
+                codec_badge = ""
+                if codec:
+                    codec_clr = "#6366f1" if "265" in codec or "AV1" in codec else "#4b5563"
+                    codec_badge = (
+                        f'<span style="background:{codec_clr};color:#fff;font-size:0.65rem;'
+                        f'font-weight:700;padding:1px 7px;border-radius:4px;">{codec}</span>&nbsp;'
+                    )
+
+                # ── Pastilla de audio ─────────────────────────────────────────
+                audio_badge = ""
+                if audio:
+                    audio_badge = (
+                        f'<span style="background:rgba(16,185,129,0.2);color:#34d399;'
+                        f'font-size:0.65rem;font-weight:600;padding:1px 7px;border-radius:4px;">'
+                        f'🔊 {audio}</span>&nbsp;'
+                    )
+
                 st.markdown(
-                    f'<div style="font-size:0.82rem;color:#8888b0;line-height:2;">'
-                    f'<b style="color:#c4b5fd;">{lang_badge}</b>'
+                    # Fila 1: idioma + formato
+                    f'<div style="margin-bottom:6px;">'
+                    f'<b style="color:#c4b5fd;font-size:0.82rem;">{lang_badge}</b>'
                     f'&nbsp;&nbsp;'
-                    f'<span style="background:rgba(120,80,255,0.15);color:{q_color};'
-                    f'font-weight:700;font-size:0.72rem;padding:2px 8px;border-radius:6px;">'
-                    f'{t["q_label"]}</span><br>'
+                    # Pastilla resolución grande
+                    f'<span style="background:{res_bg};color:{res_fg};font-size:0.75rem;'
+                    f'font-weight:900;padding:2px 10px;border-radius:6px;letter-spacing:0.5px;">'
+                    f'{res}</span>'
+                    f'&nbsp;'
+                    # Pastilla fuente
+                    f'<span style="background:{src_clr};color:#fff;font-size:0.65rem;'
+                    f'font-weight:700;padding:2px 8px;border-radius:4px;">{src or source}</span>'
+                    f'</div>'
+                    # Fila 2: codec + audio
+                    f'<div style="margin-bottom:4px;">'
+                    f'{codec_badge}{audio_badge}'
+                    f'</div>'
+                    # Fila 3: seeds / size
+                    f'<div style="font-size:0.8rem;color:#8888b0;">'
                     f'{t["seed_icon"]} <b style="color:#e2e2f0;">{t["seeds"]}</b> seeds'
                     f'&nbsp;·&nbsp;{t["leeches"]} leechers'
-                    f'&nbsp;·&nbsp;💾 {t["size"]}'
-                    f'&nbsp;·&nbsp;<span style="color:#44448a;font-size:0.72rem;">{source}</span>'
+                    f'&nbsp;·&nbsp;💾 <b style="color:#c4b5fd;">{t["size"]}</b>'
                     f'</div>',
                     unsafe_allow_html=True,
                 )
