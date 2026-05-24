@@ -1934,11 +1934,12 @@ def _render_torrents(tpb_torrents: list, yts_torrents: list,
     Renderiza torrents de TPB (con detección de español/latino)
     y YTS (siempre buena calidad, sin CAM/TS).
     """
-    mag_path = movies_dir / "magnets_movies.txt"
+    import urllib.parse as _uparse
 
-    tpb_good    = [t for t in tpb_torrents if not t["blocked"]]
-    tpb_blocked = [t for t in tpb_torrents if t["blocked"]]
-    yts_good    = yts_torrents  # YTS nunca tiene CAM/TS
+    mag_path    = movies_dir / "magnets_movies.txt"
+    tpb_good    = [t for t in tpb_torrents if not t.get("blocked")]
+    tpb_blocked = [t for t in tpb_torrents if t.get("blocked")]
+    yts_good    = list(yts_torrents)
 
     total_good = tpb_good + yts_good
 
@@ -1946,116 +1947,141 @@ def _render_torrents(tpb_torrents: list, yts_torrents: list,
         st.warning("Sin torrents encontrados. Intenta con el título en inglés.")
         return
 
-    # ── Resumen de disponibilidad ─────────────────────────────────────────────
-    has_lat = any(t["s_score"] == 2 for t in tpb_good)
-    has_esp = any(t["s_score"] >= 1 for t in tpb_good)
+    # ── Resumen disponibilidad ────────────────────────────────────────────────
+    has_lat = any(t.get("s_score", 0) == 2 for t in tpb_good)
+    has_esp = any(t.get("s_score", 0) >= 1 for t in tpb_good)
     has_hd  = any("1080p" in t.get("q_label","") or "720p" in t.get("q_label","")
                   for t in total_good)
-    has_yts = bool(yts_good)
 
     pills = []
     if has_lat:  pills.append('<span class="mh-badge mh-badge-green">🇲🇽 Latino en TPB</span>')
     elif has_esp:pills.append('<span class="mh-badge mh-badge-blue">🌎 Español en TPB</span>')
     if has_hd:   pills.append('<span class="mh-badge mh-badge-purple">🎥 HD disponible</span>')
-    if has_yts:  pills.append('<span class="mh-badge mh-badge-yellow">🎬 YTS disponible</span>')
+    if yts_good: pills.append('<span class="mh-badge mh-badge-yellow">🎬 YTS disponible</span>')
     if pills:
         st.markdown(" ".join(pills) + "<br>", unsafe_allow_html=True)
 
-    def _torrent_row(t: dict, i: int, source_tag: str = ""):
-        """Dibuja una fila de torrent con expander para el magnet."""
-        key         = f"{key_prefix}_{source_tag}_{i}"
-        saved_key   = f"saved_{key}"
-        is_saved    = st.session_state.get(saved_key, False)
+    def _draw_torrent(t: dict, row_key: str, label_badge: str, border_color: str):
+        """Dibuja una tarjeta de torrent. Sin funciones anidadas ni st.rerun()."""
+        saved_key = f"saved_{row_key}"
+        is_saved  = st.session_state.get(saved_key, False)
+        mag       = t["magnet"]
 
-        # Badge de idioma/fuente
-        if t.get("source") == "YTS":
-            lang_badge = "🎬 YTS · Alta calidad"
-            row_border = "rgba(251,191,36,0.25)"
-        elif t["s_score"] == 2:
-            lang_badge = "🇲🇽 Latino"
-            row_border = "rgba(52,211,153,0.3)"
-        elif t["s_score"] == 1:
-            lang_badge = "🌎 Español"
-            row_border = "rgba(96,165,250,0.3)"
-        elif t["s_score"] == -1:
-            lang_badge = "🇪🇸 España"
-            row_border = "rgba(120,80,255,0.15)"
-        else:
-            lang_badge = "🔤 Sin info"
-            row_border = "rgba(120,80,255,0.15)"
+        # Codifica el magnet para usarlo en un href HTML
+        mag_encoded = _uparse.quote(mag, safe="")
 
         with st.container(border=True):
-            # Nombre
+            # ── Nombre ───────────────────────────────────────────────────────
             st.markdown(
                 f'<div style="font-weight:600;font-size:0.88rem;color:#e2e2f0;'
-                f'border-left:3px solid {row_border};padding-left:8px;margin-bottom:6px;">'
-                f'{t["name"][:100]}</div>',
+                f'border-left:3px solid {border_color};padding-left:8px;margin-bottom:4px;">'
+                f'{t["name"][:105]}</div>',
                 unsafe_allow_html=True,
             )
 
-            col_meta, col_btn = st.columns([3, 2])
+            col_meta, col_actions = st.columns([3, 3])
+
             with col_meta:
                 st.markdown(
-                    f'<div style="font-size:0.8rem;color:#8888b0;line-height:1.8;">'
-                    f'<b style="color:#c4b5fd;">{lang_badge}</b> &nbsp;·&nbsp; '
-                    f'<span class="mh-badge mh-badge-purple" style="font-size:0.68rem;">'
-                    f'{t["q_label"]}</span><br>'
-                    f'{t["seed_icon"]} <b style="color:#e2e2f0;">{t["seeds"]}</b> seeds'
-                    f' &nbsp;·&nbsp; {t["leeches"]} leechers'
-                    f' &nbsp;·&nbsp; 💾 {t["size"]}'
+                    f'<div style="font-size:0.8rem;color:#8888b0;line-height:1.9;">'
+                    f'<b style="color:#c4b5fd;">{label_badge}</b><br>'
+                    f'<span class="mh-badge mh-badge-purple" style="font-size:0.68rem;">{t["q_label"]}</span>'
+                    f'&nbsp; {t["seed_icon"]} <b style="color:#e2e2f0;">{t["seeds"]}</b> seeds'
+                    f' · {t["leeches"]} leechers · 💾 {t["size"]}'
                     f'</div>',
                     unsafe_allow_html=True,
                 )
 
-            with col_btn:
-                # Guardar magnet
-                btn_label = "✅ Guardado" if is_saved else "💾 Guardar magnet"
-                if st.button(btn_label, key=f"save_{key}",
-                             use_container_width=True,
-                             type="secondary" if is_saved else "primary"):
-                    if not is_saved:
-                        mag_path.parent.mkdir(parents=True, exist_ok=True)
-                        with open(mag_path, "a", encoding="utf-8") as fh:
-                            fh.write(
-                                f"# {movie['title']} ({movie.get('year','')}) "
-                                f"— {t['q_label']} — {lang_badge}\n"
-                                f"{t['magnet']}\n\n"
-                            )
-                        st.session_state[saved_key] = True
-                        st.rerun()
+            with col_actions:
+                # ── Botón: Abrir en uTorrent Web ─────────────────────────────
+                # Usa un link HTML con href="magnet:..." — el navegador lo pasa
+                # a uTorrent Web si está configurado como cliente por defecto.
+                st.markdown(
+                    f'<a href="{mag}" target="_blank" rel="noopener" '
+                    f'style="display:block;width:100%;text-align:center;'
+                    f'background:linear-gradient(135deg,#7050ff,#a855f7);'
+                    f'color:#fff;font-weight:700;font-size:0.84rem;'
+                    f'border-radius:10px;padding:9px 0;text-decoration:none;'
+                    f'margin-bottom:6px;letter-spacing:0.3px;">'
+                    f'▶ Abrir en uTorrent Web</a>',
+                    unsafe_allow_html=True,
+                )
 
-            # Magnet en expander (siempre visible al abrirlo, no necesita toggle)
-            with st.expander("🔗 Ver / copiar magnet link"):
-                st.code(t["magnet"], language="")
-                st.caption("Copia este link y pégalo en uTorrent, qBittorrent o cualquier cliente.")
+                # ── Botón: Guardar magnet en archivo ─────────────────────────
+                save_label = "✅ Magnet guardado" if is_saved else "💾 Guardar magnet"
+                if st.button(save_label, key=f"btn_save_{row_key}",
+                             use_container_width=True, disabled=is_saved):
+                    mag_path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(mag_path, "a", encoding="utf-8") as fh:
+                        fh.write(
+                            f"# {movie.get('title','')} ({movie.get('year','')}) "
+                            f"— {t['q_label']} — {label_badge}\n"
+                            f"{mag}\n\n"
+                        )
+                    st.session_state[saved_key] = True
+                    # Sin st.rerun() — Streamlit ya recarga tras el click
 
-    # ── Sección TPB ───────────────────────────────────────────────────────────
+            # ── Magnet link expandible ────────────────────────────────────────
+            with st.expander("🔗 Ver magnet link completo"):
+                st.code(mag, language="")
+                st.caption(
+                    "Puedes pegar este link directamente en uTorrent Web → "
+                    "botón ➕ → 'Agregar enlace de torrent'."
+                )
+
+    # ═════════════════════════════════════════════════════════════════
+    # Sección TPB
+    # ═════════════════════════════════════════════════════════════════
     if tpb_good:
-        st.markdown('<div class="mh-section-title">The Pirate Bay · con detección de idioma</div>',
-                    unsafe_allow_html=True)
-        for i, t in enumerate(tpb_good):
-            _torrent_row(t, i, source_tag="tpb")
-
-    # ── Sección YTS ───────────────────────────────────────────────────────────
-    if yts_good:
         st.markdown(
-            '<div class="mh-section-title" style="margin-top:20px;">'
-            'YTS · Alta calidad garantizada (BluRay / WEB) · Sin CAM/TS</div>',
+            '<div class="mh-section-title">🏴‍☠️ The Pirate Bay — con detección de idioma</div>',
             unsafe_allow_html=True,
         )
-        st.caption("⚠️ YTS no incluye audio latino — necesitarás descargar subtítulos en español aparte (ej: Subdivx.com, OpenSubtitles.org)")
-        for i, t in enumerate(yts_good):
-            _torrent_row(t, i, source_tag="yts")
+        for i, t in enumerate(tpb_good):
+            s = t.get("s_score", 0)
+            if t.get("source") == "YTS":
+                badge, color = "🎬 YTS", "rgba(251,191,36,0.4)"
+            elif s == 2:
+                badge, color = "🇲🇽 Latino", "rgba(52,211,153,0.45)"
+            elif s == 1:
+                badge, color = "🌎 Español", "rgba(96,165,250,0.4)"
+            elif s == -1:
+                badge, color = "🇪🇸 España", "rgba(120,80,255,0.2)"
+            else:
+                badge, color = "🔤 Sin info idioma", "rgba(100,100,130,0.2)"
+            _draw_torrent(t, f"{key_prefix}_tpb_{i}", badge, color)
 
-    # ── Bloqueados ────────────────────────────────────────────────────────────
+    # ═════════════════════════════════════════════════════════════════
+    # Sección YTS
+    # ═════════════════════════════════════════════════════════════════
+    if yts_good:
+        st.markdown(
+            '<div class="mh-section-title" style="margin-top:18px;">'
+            '🎬 YTS — Alta calidad garantizada · BluRay / WEB · Sin CAM/TS</div>',
+            unsafe_allow_html=True,
+        )
+        st.info(
+            "ℹ️ YTS no incluye audio en español. Para subtítulos en español latino "
+            "descárgalos en [Subdivx.com](https://www.subdivx.com) u "
+            "[OpenSubtitles.org](https://www.opensubtitles.org) después de descargar.",
+            icon="🗒️",
+        )
+        for i, t in enumerate(yts_good):
+            _draw_torrent(t, f"{key_prefix}_yts_{i}",
+                          "🎬 YTS · Alta calidad", "rgba(251,191,36,0.35)")
+
+    # ═════════════════════════════════════════════════════════════════
+    # Bloqueados
+    # ═════════════════════════════════════════════════════════════════
     if show_blocked and tpb_blocked:
-        with st.expander(f"🚫 Filtrados por mala calidad (CAM/TS/HDCAM) — {len(tpb_blocked)}"):
-            st.caption("Grabaciones de cine o copias de muy baja calidad. Se muestran solo como referencia.")
+        with st.expander(f"🚫 Filtrados por mala calidad — {len(tpb_blocked)} resultados"):
+            st.caption("CAM, TS, HDCAM, DVDSCR, etc. — grabaciones de cine o calidad inaceptable.")
             for t in tpb_blocked:
                 st.markdown(
-                    f'<div style="font-size:0.8rem;color:#6b3030;padding:4px 0;">'
-                    f'🚫 {t["name"][:90]} &nbsp; <span style="color:#55338a;">'
-                    f'Seeds: {t["seeds"]}</span></div>',
+                    f'<div style="color:#6b2020;font-size:0.8rem;padding:3px 0;">'
+                    f'🚫 {t["name"][:95]}'
+                    f'<span style="color:#55228a;"> · {t["seeds"]} seeds</span>'
+                    f'</div>',
                     unsafe_allow_html=True,
                 )
 
