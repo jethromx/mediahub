@@ -1648,7 +1648,8 @@ def page_peliculas():
     try:
         from movies_export import (
             tmdb_discover, tmdb_search, tmdb_popular, tmdb_trending,
-            find_movie_torrents, GENRE_IDS, _format_movie,
+            find_movie_torrents, find_movie_torrents_combined,
+            yts_search, GENRE_IDS, _format_movie,
         )
         MOVIES_OK = True
     except Exception as e:
@@ -1738,12 +1739,12 @@ def page_peliculas():
 
                 st.markdown("---")
                 st.markdown("#### 🏴‍☠️ Torrents disponibles")
-                with st.spinner("Buscando torrents en The Pirate Bay..."):
-                    torrents = find_movie_torrents(
+                with st.spinner("Buscando en The Pirate Bay y YTS..."):
+                    tpb_t, yts_t = find_movie_torrents_combined(
                         movie["title"], movie["year"], n=n_torrents
                     )
 
-                _render_torrents(torrents, movie, movies_dir, show_blocked,
+                _render_torrents(tpb_t, yts_t, movie, movies_dir, show_blocked,
                                  key_prefix="buscar")
 
     # ═══════════════════════════════════════════════════════════════════════════
@@ -1813,15 +1814,19 @@ def page_peliculas():
                     st.markdown("##### 🏴‍☠️ Torrents")
 
                     key = f"epoch_{i}"
-                    if st.button("Buscar torrents", key=f"btn_{key}",
+                    if st.button("🔍 Buscar torrents", key=f"btn_{key}",
                                  use_container_width=True):
-                        with st.spinner("Buscando en TPB..."):
-                            torrents = find_movie_torrents(movie["title"], movie["year"])
-                        st.session_state[f"torrents_{key}"] = torrents
+                        with st.spinner("Buscando en TPB y YTS..."):
+                            tpb_t, yts_t = find_movie_torrents_combined(
+                                movie["title"], movie["year"]
+                            )
+                        st.session_state[f"tpb_{key}"] = tpb_t
+                        st.session_state[f"yts_{key}"] = yts_t
 
-                    torrents = st.session_state.get(f"torrents_{key}", None)
-                    if torrents is not None:
-                        _render_torrents(torrents, movie, movies_dir,
+                    tpb_t = st.session_state.get(f"tpb_{key}")
+                    yts_t = st.session_state.get(f"yts_{key}")
+                    if tpb_t is not None or yts_t is not None:
+                        _render_torrents(tpb_t or [], yts_t or [], movie, movies_dir,
                                          show_blocked=False, key_prefix=key)
 
     # ═══════════════════════════════════════════════════════════════════════════
@@ -1922,93 +1927,137 @@ def _render_movie_card(movie: dict, compact: bool = False):
             )
 
 
-def _render_torrents(torrents: list, movie: dict, movies_dir: Path,
+def _render_torrents(tpb_torrents: list, yts_torrents: list,
+                     movie: dict, movies_dir: Path,
                      show_blocked: bool, key_prefix: str):
-    """Renderiza la lista de torrents con badges de calidad e idioma."""
-    good    = [t for t in torrents if not t["blocked"]]
-    blocked = [t for t in torrents if t["blocked"]]
-
-    if not good and not blocked:
-        st.warning("Sin torrents encontrados en The Pirate Bay.")
-        return
-
-    # Resumen rápido
-    has_lat = any(t["s_score"] == 2 for t in good)
-    has_esp = any(t["s_score"] >= 1 for t in good)
-    has_hd  = any("1080p" in t["q_label"] or "720p" in t["q_label"] for t in good)
-
-    pills = []
-    if has_lat:  pills.append('<span class="mh-badge mh-badge-green">🇲🇽 Latino disponible</span>')
-    elif has_esp:pills.append('<span class="mh-badge mh-badge-blue">🌎 Español disponible</span>')
-    if has_hd:   pills.append('<span class="mh-badge mh-badge-purple">🎥 HD disponible</span>')
-    if pills:
-        st.markdown(" ".join(pills), unsafe_allow_html=True)
-
+    """
+    Renderiza torrents de TPB (con detección de español/latino)
+    y YTS (siempre buena calidad, sin CAM/TS).
+    """
     mag_path = movies_dir / "magnets_movies.txt"
 
-    for i, t in enumerate(good):
-        key = f"{key_prefix}_t{i}"
+    tpb_good    = [t for t in tpb_torrents if not t["blocked"]]
+    tpb_blocked = [t for t in tpb_torrents if t["blocked"]]
+    yts_good    = yts_torrents  # YTS nunca tiene CAM/TS
 
-        # Color de fondo según idioma
-        if t["s_score"] == 2:
-            border_color = "rgba(52,211,153,0.3)"
-            bg_color     = "rgba(52,211,153,0.05)"
+    total_good = tpb_good + yts_good
+
+    if not total_good and not tpb_blocked:
+        st.warning("Sin torrents encontrados. Intenta con el título en inglés.")
+        return
+
+    # ── Resumen de disponibilidad ─────────────────────────────────────────────
+    has_lat = any(t["s_score"] == 2 for t in tpb_good)
+    has_esp = any(t["s_score"] >= 1 for t in tpb_good)
+    has_hd  = any("1080p" in t.get("q_label","") or "720p" in t.get("q_label","")
+                  for t in total_good)
+    has_yts = bool(yts_good)
+
+    pills = []
+    if has_lat:  pills.append('<span class="mh-badge mh-badge-green">🇲🇽 Latino en TPB</span>')
+    elif has_esp:pills.append('<span class="mh-badge mh-badge-blue">🌎 Español en TPB</span>')
+    if has_hd:   pills.append('<span class="mh-badge mh-badge-purple">🎥 HD disponible</span>')
+    if has_yts:  pills.append('<span class="mh-badge mh-badge-yellow">🎬 YTS disponible</span>')
+    if pills:
+        st.markdown(" ".join(pills) + "<br>", unsafe_allow_html=True)
+
+    def _torrent_row(t: dict, i: int, source_tag: str = ""):
+        """Dibuja una fila de torrent con expander para el magnet."""
+        key         = f"{key_prefix}_{source_tag}_{i}"
+        saved_key   = f"saved_{key}"
+        is_saved    = st.session_state.get(saved_key, False)
+
+        # Badge de idioma/fuente
+        if t.get("source") == "YTS":
+            lang_badge = "🎬 YTS · Alta calidad"
+            row_border = "rgba(251,191,36,0.25)"
+        elif t["s_score"] == 2:
+            lang_badge = "🇲🇽 Latino"
+            row_border = "rgba(52,211,153,0.3)"
         elif t["s_score"] == 1:
-            border_color = "rgba(96,165,250,0.3)"
-            bg_color     = "rgba(96,165,250,0.05)"
+            lang_badge = "🌎 Español"
+            row_border = "rgba(96,165,250,0.3)"
+        elif t["s_score"] == -1:
+            lang_badge = "🇪🇸 España"
+            row_border = "rgba(120,80,255,0.15)"
         else:
-            border_color = "rgba(120,80,255,0.2)"
-            bg_color     = "rgba(120,80,255,0.04)"
+            lang_badge = "🔤 Sin info"
+            row_border = "rgba(120,80,255,0.15)"
 
         with st.container(border=True):
-            col_info, col_meta, col_btn = st.columns([5, 3, 2])
+            # Nombre
+            st.markdown(
+                f'<div style="font-weight:600;font-size:0.88rem;color:#e2e2f0;'
+                f'border-left:3px solid {row_border};padding-left:8px;margin-bottom:6px;">'
+                f'{t["name"][:100]}</div>',
+                unsafe_allow_html=True,
+            )
 
-            with col_info:
-                st.markdown(
-                    f'<div style="font-weight:600;font-size:0.88rem;'
-                    f'color:#e2e2f0;margin-bottom:4px;">{t["name"][:90]}</div>',
-                    unsafe_allow_html=True,
-                )
-
+            col_meta, col_btn = st.columns([3, 2])
             with col_meta:
-                # Ícono seeds
-                seed_txt = f"{t['seed_icon']} {t['seeds']} seeds"
-                lch_txt  = f"· {t['leeches']} leechers"
-
                 st.markdown(
-                    f'<div style="font-size:0.8rem;color:#8888b0;">'
-                    f'{t["lang_icon"]}<br>'
-                    f'<span class="mh-badge mh-badge-purple" style="font-size:0.7rem;">'
+                    f'<div style="font-size:0.8rem;color:#8888b0;line-height:1.8;">'
+                    f'<b style="color:#c4b5fd;">{lang_badge}</b> &nbsp;·&nbsp; '
+                    f'<span class="mh-badge mh-badge-purple" style="font-size:0.68rem;">'
                     f'{t["q_label"]}</span><br>'
-                    f'<span style="color:#55558a;">{seed_txt} {lch_txt}</span><br>'
-                    f'<span style="color:#44448a;">💾 {t["size"]}</span>'
+                    f'{t["seed_icon"]} <b style="color:#e2e2f0;">{t["seeds"]}</b> seeds'
+                    f' &nbsp;·&nbsp; {t["leeches"]} leechers'
+                    f' &nbsp;·&nbsp; 💾 {t["size"]}'
                     f'</div>',
                     unsafe_allow_html=True,
                 )
 
             with col_btn:
                 # Guardar magnet
-                if st.button("💾 Guardar magnet", key=f"mag_{key}",
+                btn_label = "✅ Guardado" if is_saved else "💾 Guardar magnet"
+                if st.button(btn_label, key=f"save_{key}",
                              use_container_width=True,
-                             help="Agrega el magnet link al archivo"):
-                    with open(mag_path, "a", encoding="utf-8") as f:
-                        f.write(f"# {movie['title']} ({movie['year']}) — {t['q_label']}\n")
-                        f.write(f"{t['magnet']}\n\n")
-                    st.toast(f"✅ Magnet guardado para {movie['title']}", icon="💾")
+                             type="secondary" if is_saved else "primary"):
+                    if not is_saved:
+                        mag_path.parent.mkdir(parents=True, exist_ok=True)
+                        with open(mag_path, "a", encoding="utf-8") as fh:
+                            fh.write(
+                                f"# {movie['title']} ({movie.get('year','')}) "
+                                f"— {t['q_label']} — {lang_badge}\n"
+                                f"{t['magnet']}\n\n"
+                            )
+                        st.session_state[saved_key] = True
+                        st.rerun()
 
-                # Copiar magnet (muestra el link)
-                if st.button("🔗 Ver magnet", key=f"show_{key}",
-                             use_container_width=True):
-                    st.session_state[f"show_mag_{key}"] = not st.session_state.get(f"show_mag_{key}", False)
-
-            if st.session_state.get(f"show_mag_{key}"):
+            # Magnet en expander (siempre visible al abrirlo, no necesita toggle)
+            with st.expander("🔗 Ver / copiar magnet link"):
                 st.code(t["magnet"], language="")
+                st.caption("Copia este link y pégalo en uTorrent, qBittorrent o cualquier cliente.")
 
-    if show_blocked and blocked:
-        with st.expander(f"🚫 Bloqueados por calidad (CAM/TS/HDCAM) — {len(blocked)}"):
-            st.caption("Estos resultados se filtraron por ser grabaciones de cine o calidad muy baja.")
-            for t in blocked:
-                st.caption(f"🚫 {t['name'][:80]}  —  {t['seeds']} seeds")
+    # ── Sección TPB ───────────────────────────────────────────────────────────
+    if tpb_good:
+        st.markdown('<div class="mh-section-title">The Pirate Bay · con detección de idioma</div>',
+                    unsafe_allow_html=True)
+        for i, t in enumerate(tpb_good):
+            _torrent_row(t, i, source_tag="tpb")
+
+    # ── Sección YTS ───────────────────────────────────────────────────────────
+    if yts_good:
+        st.markdown(
+            '<div class="mh-section-title" style="margin-top:20px;">'
+            'YTS · Alta calidad garantizada (BluRay / WEB) · Sin CAM/TS</div>',
+            unsafe_allow_html=True,
+        )
+        st.caption("⚠️ YTS no incluye audio latino — necesitarás descargar subtítulos en español aparte (ej: Subdivx.com, OpenSubtitles.org)")
+        for i, t in enumerate(yts_good):
+            _torrent_row(t, i, source_tag="yts")
+
+    # ── Bloqueados ────────────────────────────────────────────────────────────
+    if show_blocked and tpb_blocked:
+        with st.expander(f"🚫 Filtrados por mala calidad (CAM/TS/HDCAM) — {len(tpb_blocked)}"):
+            st.caption("Grabaciones de cine o copias de muy baja calidad. Se muestran solo como referencia.")
+            for t in tpb_blocked:
+                st.markdown(
+                    f'<div style="font-size:0.8rem;color:#6b3030;padding:4px 0;">'
+                    f'🚫 {t["name"][:90]} &nbsp; <span style="color:#55338a;">'
+                    f'Seeds: {t["seeds"]}</span></div>',
+                    unsafe_allow_html=True,
+                )
 
 
 def page_explorador():

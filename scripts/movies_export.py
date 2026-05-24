@@ -208,6 +208,96 @@ def classify_torrent(r: dict) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# YTS API  (yts.mx — sin API key, solo películas, muy buena calidad)
+# ─────────────────────────────────────────────────────────────────────────────
+
+YTS_BASE = "https://yts.mx/api/v2"
+
+def yts_search(title: str, year: str = None) -> list[dict]:
+    """
+    Busca en YTS por título. Devuelve torrents ya clasificados.
+    YTS siempre es BluRay/WEB-DL de buena calidad (nunca CAM/TS).
+    Nota: YTS no indica idioma — los subtítulos se buscan aparte.
+    """
+    query = f"{title} {year}".strip() if year else title
+    params = {
+        "query_term": query,
+        "sort_by":    "seeds",
+        "order_by":   "desc",
+        "limit":      10,
+    }
+    url  = f"{YTS_BASE}/list_movies.json?" + urllib.parse.urlencode(params)
+    data = http_get(url, timeout=12)
+    if not data or data.get("status") != "ok":
+        return []
+
+    movies_list = (data.get("data") or {}).get("movies") or []
+    results = []
+
+    for movie_data in movies_list:
+        m_title = movie_data.get("title", title)
+        m_year  = str(movie_data.get("year", year or ""))
+        for t in (movie_data.get("torrents") or []):
+            quality = t.get("quality", "")           # "720p", "1080p", "2160p"
+            t_type  = t.get("type", "")              # "bluray", "web"
+            seeds   = int(t.get("seeds", 0))
+            peers   = int(t.get("peers", 0))
+            size_b  = int(t.get("size_bytes", 0))
+            ih      = t.get("hash", "")
+            name    = f"{m_title} ({m_year}) {quality} {t_type} [YTS]".strip()
+
+            if not ih:
+                continue
+
+            # Score de calidad
+            q_score = QUALITY_RANK.get(t_type.lower(), 0)
+            res_pts  = {"2160p": 3, "1080p": 2, "720p": 1}.get(quality, 0)
+            q_score  = max(q_score, res_pts + 5)   # YTS siempre es buena calidad
+
+            q_label = f"{quality} · {t_type.upper()}" if t_type else quality
+
+            if seeds >= 30:   seed_icon = "🟢"
+            elif seeds >= 10: seed_icon = "🟡"
+            elif seeds >= 1:  seed_icon = "🔴"
+            else:             seed_icon = "⚫"
+
+            results.append({
+                "name":       name,
+                "seeds":      seeds,
+                "leeches":    peers,
+                "size":       size_human(size_b),
+                "size_bytes": size_b,
+                "info_hash":  ih.lower(),
+                "magnet":     magnet(ih, name),
+                "q_score":    q_score,
+                "q_label":    q_label,
+                "s_score":    0,          # YTS no indica idioma
+                "seed_icon":  seed_icon,
+                "lang_icon":  "🔤 Subs externos",
+                "blocked":    False,
+                "source":     "YTS",
+            })
+
+    results.sort(key=lambda r: (r["q_score"], r["seeds"]), reverse=True)
+    return results
+
+
+def find_movie_torrents_combined(title: str, year: str,
+                                 n: int = 12) -> tuple[list[dict], list[dict]]:
+    """
+    Busca en ambas fuentes (TPB + YTS) y devuelve (tpb_results, yts_results).
+    Cada lista ya viene ordenada: Latino > Español > otro, luego calidad.
+    """
+    # TPB
+    tpb = find_movie_torrents(title, year, n=n, prefer_spanish=True)
+
+    # YTS (en paralelo conceptualmente, secuencial aquí)
+    yts = yts_search(title, year)
+
+    return tpb, yts
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # TMDB
 # ─────────────────────────────────────────────────────────────────────────────
 
