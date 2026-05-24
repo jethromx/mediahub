@@ -282,19 +282,58 @@ def yts_search(title: str, year: str = None) -> list[dict]:
     return results
 
 
+def composite_score(t: dict) -> tuple:
+    """
+    Puntuación compuesta para ordenar torrents de mejor a peor.
+
+    Prioridades (en orden):
+      1. Idioma: Latino(2) > Español(1) > Sin info(0) > España(-1)
+      2. Calidad: REMUX/BluRay > WEB-DL > WEBRip > DVDRip …
+         YTS suma +2 porque siempre es BluRay/WEB garantizado
+      3. Seeds: normalizados con log para que no dominen sobre calidad
+    """
+    import math
+    s     = t.get("s_score", 0)
+    q     = t.get("q_score", 0)
+    seeds = t.get("seeds", 0)
+    yts_b = 2 if t.get("source") == "YTS" else 0          # bonus YTS
+    seed_n = math.log10(seeds + 1)                         # 0→0, 10→1, 100→2, 1000→3
+    return (s, q + yts_b, round(seed_n, 2))
+
+
 def find_movie_torrents_combined(title: str, year: str,
-                                 n: int = 12) -> tuple[list[dict], list[dict]]:
+                                 n: int = 15) -> tuple[list[dict], list[dict]]:
     """
-    Busca en ambas fuentes (TPB + YTS) y devuelve (tpb_results, yts_results).
-    Cada lista ya viene ordenada: Latino > Español > otro, luego calidad.
+    Busca en TPB + YTS, combina, ordena por score compuesto y devuelve:
+      (good_sorted, blocked)
+
+    good_sorted: lista única con el mejor resultado primero.
+    El campo "rank" (0-based) y "best" (True en el #1) se agregan a cada item.
     """
-    # TPB
-    tpb = find_movie_torrents(title, year, n=n, prefer_spanish=True)
+    tpb_all = find_movie_torrents(title, year, n=n, prefer_spanish=True)
+    yts_all = yts_search(title, year)
 
-    # YTS (en paralelo conceptualmente, secuencial aquí)
-    yts = yts_search(title, year)
+    good    = [t for t in tpb_all if not t.get("blocked")] + yts_all
+    blocked = [t for t in tpb_all if t.get("blocked")]
 
-    return tpb, yts
+    # Deduplicar por info_hash
+    seen  = set()
+    dedup = []
+    for t in good:
+        ih = t.get("info_hash", "")
+        if ih and ih in seen:
+            continue
+        seen.add(ih)
+        dedup.append(t)
+
+    dedup.sort(key=composite_score, reverse=True)
+
+    # Marcar posición
+    for i, t in enumerate(dedup):
+        t["rank"] = i
+        t["best"] = (i == 0)
+
+    return dedup[:n], blocked
 
 
 # ─────────────────────────────────────────────────────────────────────────────
