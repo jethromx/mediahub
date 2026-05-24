@@ -24,8 +24,10 @@ DEFAULT_CONFIG = {
     "lastfm_api_key":    "7049ab07a1bbfce19db16bea7b004b29",
     "spotify_client_id": "25fedca142ec4de8b5663c330f9d21de",
     "spotify_secret":    "7a44614137a94523b4c5ab867400fe37",
+    "tmdb_api_key":      "",
     "music_folder":      str(Path.home() / "Downloads" / "Musica"),
     "ebooks_folder":     str(Path.home() / "Downloads" / "Ebooks"),
+    "movies_folder":     str(Path.home() / "Downloads" / "Peliculas"),
     "phone_folder":      str(Path.home() / "Downloads" / "Musica_Movil"),
     "phone_use_limit":   False,
     "phone_limit_gb":    32,
@@ -115,13 +117,13 @@ def page_inicio():
             🎵 MediaHub
         </div>
         <div style="color:#8888b0;font-size:1.05rem;max-width:560px;line-height:1.7;">
-            Tu biblioteca de música y ebooks, <strong style="color:#c4b5fd;">completamente local</strong> y sin suscripciones.
+            Tu biblioteca de música, películas y ebooks, <strong style="color:#c4b5fd;">completamente local</strong> y sin suscripciones.
             Descarga, organiza y exporta — todo desde tu máquina.
         </div>
         <div style="margin-top:18px;display:flex;gap:10px;flex-wrap:wrap;">
             <span class="mh-badge mh-badge-purple">🔒 100% Local</span>
             <span class="mh-badge mh-badge-blue">🎵 Last.fm + TPB</span>
-            <span class="mh-badge mh-badge-green">📱 Sin duplicados</span>
+            <span class="mh-badge mh-badge-green">🎬 Películas Latino</span>
             <span class="mh-badge mh-badge-yellow">🔧 Fix Metadata</span>
         </div>
     </div>
@@ -163,6 +165,21 @@ def page_inicio():
             st.rerun()
 
     with col2:
+        st.markdown("""
+        <div class="mh-card">
+            <span class="mh-card-icon">🎬</span>
+            <div class="mh-card-title">Películas</div>
+            <div class="mh-card-desc">
+                Explora películas de los 70s hasta hoy vía <strong>TMDB</strong>,
+                encuentra torrents en español <strong>latino</strong> y filtra calidad CAM/TS.
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("Ir a Películas →", use_container_width=True, key="home_movies"):
+            st.session_state.page = "🎬 Películas"
+            st.rerun()
+
+    with col3:
         st.markdown("""
         <div class="mh-card">
             <span class="mh-card-icon">📚</span>
@@ -1544,6 +1561,7 @@ def page_config():
     cfg = load_config()
 
     st.markdown("### 🔑 APIs")
+
     col1, col2 = st.columns(2)
     with col1:
         lastfm_key = st.text_input("Last.fm API Key", value=cfg["lastfm_api_key"], type="password")
@@ -1552,9 +1570,20 @@ def page_config():
         st.markdown("")
         st.markdown("🔗 [Obtener key en Last.fm](https://www.last.fm/api/account/create)")
 
+    col3, col4 = st.columns(2)
+    with col3:
+        tmdb_key = st.text_input("TMDB API Key (películas)", value=cfg.get("tmdb_api_key", ""),
+                                 type="password",
+                                 help="Necesaria para la sección 🎬 Películas")
+    with col4:
+        st.markdown("")
+        st.markdown("")
+        st.markdown("🔗 [Obtener key en TMDB](https://www.themoviedb.org/settings/api) · Gratis")
+
     st.markdown("### 📁 Carpetas")
     music_folder  = st.text_input("Carpeta de música (MP3s)", value=cfg["music_folder"])
     ebooks_folder = st.text_input("Carpeta de ebooks", value=cfg["ebooks_folder"])
+    movies_folder = st.text_input("Carpeta de películas", value=cfg.get("movies_folder", str(Path.home() / "Downloads" / "Peliculas")))
     phone_folder  = st.text_input("Carpeta para el móvil (sin duplicados)", value=cfg.get("phone_folder", str(Path.home() / "Downloads" / "Musica_Movil")))
     col_ph1, col_ph2 = st.columns([1, 2])
     with col_ph1:
@@ -1583,8 +1612,10 @@ def page_config():
         new_cfg = {
             **cfg,
             "lastfm_api_key": lastfm_key,
+            "tmdb_api_key":   tmdb_key,
             "music_folder":   music_folder,
             "ebooks_folder":  ebooks_folder,
+            "movies_folder":  movies_folder,
             "phone_folder":      phone_folder,
             "phone_use_limit":   phone_use_limit,
             "phone_limit_gb":    phone_limit_gb,
@@ -1604,6 +1635,380 @@ def page_config():
                 script.write_text(code)
 
         st.success("✅ Configuración guardada")
+
+
+def page_peliculas():
+    import urllib.request, urllib.parse, json as _json, re as _re, time as _time
+
+    st.title("🎬 Películas")
+    cfg = load_config()
+
+    # ── Importar helpers del script ───────────────────────────────────────────
+    sys.path.insert(0, str(BASE_DIR / "scripts"))
+    try:
+        from movies_export import (
+            tmdb_discover, tmdb_search, tmdb_popular, tmdb_trending,
+            find_movie_torrents, GENRE_IDS, _format_movie,
+        )
+        MOVIES_OK = True
+    except Exception as e:
+        st.error(f"Error cargando módulo de películas: {e}")
+        MOVIES_OK = False
+        return
+
+    # ── TMDB API key ──────────────────────────────────────────────────────────
+    tmdb_key = cfg.get("tmdb_api_key", "").strip()
+    if not tmdb_key:
+        st.markdown("""
+        <div style="background:rgba(251,191,36,0.1);border:1px solid rgba(251,191,36,0.35);
+                    border-radius:14px;padding:22px 24px;margin-bottom:20px;">
+            <div style="color:#fcd34d;font-weight:700;font-size:1.05rem;margin-bottom:10px;">
+                🔑 Se necesita una API Key de TMDB
+            </div>
+            <div style="color:#a89060;line-height:1.7;font-size:0.9rem;">
+                TMDB (The Movie Database) es gratis y tarda menos de 2 minutos en registrarse.<br>
+                <strong style="color:#fcd34d;">1.</strong> Ve a
+                <a href="https://www.themoviedb.org/signup" target="_blank"
+                   style="color:#60a5fa;">themoviedb.org/signup</a> y crea tu cuenta.<br>
+                <strong style="color:#fcd34d;">2.</strong> En tu perfil →
+                <a href="https://www.themoviedb.org/settings/api" target="_blank"
+                   style="color:#60a5fa;">Configuración → API</a> → solicita una API key (tipo <em>Developer</em>).<br>
+                <strong style="color:#fcd34d;">3.</strong> Pega la key en
+                <strong>⚙️ Configuración → TMDB API Key</strong> y guarda.
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("Ir a Configuración →", type="primary"):
+            st.session_state.page = "⚙️ Configuración"
+            st.rerun()
+        return
+
+    # ─── Tabs principales ─────────────────────────────────────────────────────
+    tab_buscar, tab_decadas, tab_resultados = st.tabs([
+        "🔎 Buscar película",
+        "📅 Explorar por época / género",
+        "📂 Resultados guardados",
+    ])
+
+    movies_dir = BASE_DIR / "output" / "movies"
+    movies_dir.mkdir(parents=True, exist_ok=True)
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # TAB 1 — Búsqueda directa
+    # ═══════════════════════════════════════════════════════════════════════════
+    with tab_buscar:
+        st.markdown("Busca cualquier película y encuentra sus torrents en **The Pirate Bay** con prioridad en **español latino**.")
+
+        col_q, col_yr = st.columns([3, 1])
+        with col_q:
+            query = st.text_input("🎬 Título de la película",
+                                  placeholder="ej: El Padrino, Titanic, Interstellar...",
+                                  key="mov_query")
+        with col_yr:
+            year_hint = st.number_input("Año (opcional)", min_value=0, max_value=2030,
+                                        value=0, step=1, key="mov_year",
+                                        help="Ayuda a encontrar la versión correcta")
+
+        col_opts1, col_opts2 = st.columns(2)
+        with col_opts1:
+            show_blocked = st.checkbox("Mostrar resultados bloqueados (CAM/TS)",
+                                       value=False, key="mov_show_blocked")
+        with col_opts2:
+            n_torrents = st.slider("Máx. torrents a mostrar", 5, 20, 10, key="mov_n")
+
+        buscar = st.button("🔍 Buscar", type="primary",
+                           use_container_width=True, disabled=not query)
+
+        if buscar and query:
+            with st.spinner(f"Buscando «{query}» en TMDB..."):
+                yr = year_hint if year_hint > 0 else None
+                movies = tmdb_search(tmdb_key, query, year=yr)
+
+            if not movies:
+                st.warning("Sin resultados en TMDB. Prueba con el título en inglés.")
+            else:
+                # Permite elegir la película correcta si hay varias
+                opciones = [f"{m['title']} ({m['year']}) ⭐{m['rating']}" for m in movies]
+                seleccion = st.selectbox("Selecciona la película correcta", opciones, key="mov_sel")
+                idx = opciones.index(seleccion)
+                movie = movies[idx]
+
+                # Tarjeta de la película
+                _render_movie_card(movie)
+
+                st.markdown("---")
+                st.markdown("#### 🏴‍☠️ Torrents disponibles")
+                with st.spinner("Buscando torrents en The Pirate Bay..."):
+                    torrents = find_movie_torrents(
+                        movie["title"], movie["year"], n=n_torrents
+                    )
+
+                _render_torrents(torrents, movie, movies_dir, show_blocked,
+                                 key_prefix="buscar")
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # TAB 2 — Explorar por épocas y géneros
+    # ═══════════════════════════════════════════════════════════════════════════
+    with tab_decadas:
+        st.markdown("Descubre las **películas más populares** de cada época.")
+
+        col_d, col_g, col_lim = st.columns([2, 2, 1])
+        with col_d:
+            decada_label = st.selectbox("📅 Época", [
+                "70s (1970–1979)", "80s (1980–1989)", "90s (1990–1999)",
+                "2000s (2000–2009)", "2010s (2010–2019)", "2020s (2020–hoy)",
+                "Tendencias semana", "Populares ahora",
+            ], key="mov_decade")
+        with col_g:
+            generos_display = ["Todos los géneros"] + [
+                g.replace("_", " ").title() for g in GENRE_IDS
+            ]
+            genero_sel = st.selectbox("🎭 Género", generos_display, key="mov_genre")
+        with col_lim:
+            limite = st.number_input("Películas", 5, 40, 15, 5, key="mov_limit")
+
+        buscar_epoca = st.button("🚀 Explorar", type="primary",
+                                 use_container_width=True, key="mov_explore_btn")
+
+        if buscar_epoca:
+            genre_key = None
+            if genero_sel != "Todos los géneros":
+                genre_key = genero_sel.lower().replace(" ", "_")
+
+            with st.spinner("Consultando TMDB..."):
+                if decada_label == "Tendencias semana":
+                    movies = tmdb_trending(tmdb_key)[:limite]
+                elif decada_label == "Populares ahora":
+                    movies = tmdb_popular(tmdb_key)[:limite]
+                else:
+                    decade_map = {
+                        "70s (1970–1979)":  (1970, 1979),
+                        "80s (1980–1989)":  (1980, 1989),
+                        "90s (1990–1999)":  (1990, 1999),
+                        "2000s (2000–2009)":(2000, 2009),
+                        "2010s (2010–2019)":(2010, 2019),
+                        "2020s (2020–hoy)": (2020, 2030),
+                    }
+                    y_gte, y_lte = decade_map[decada_label]
+                    genre_id = GENRE_IDS.get(genre_key) if genre_key else None
+                    movies = tmdb_discover(tmdb_key, y_gte, y_lte,
+                                          genre_id=genre_id, limit=limite)
+
+            if not movies:
+                st.warning("Sin resultados. Prueba con otro filtro.")
+            else:
+                st.success(f"✅ {len(movies)} películas encontradas")
+                st.session_state["mov_epoch_results"] = movies
+
+        # Muestra resultados guardados en session
+        movies = st.session_state.get("mov_epoch_results", [])
+        if movies:
+            for i, movie in enumerate(movies):
+                with st.expander(
+                    f"{'⭐' if movie['rating'] >= 7 else '🎬'} "
+                    f"{movie['title']} ({movie['year']})  ·  ⭐ {movie['rating']}",
+                    expanded=False,
+                ):
+                    _render_movie_card(movie, compact=True)
+                    st.markdown("##### 🏴‍☠️ Torrents")
+
+                    key = f"epoch_{i}"
+                    if st.button("Buscar torrents", key=f"btn_{key}",
+                                 use_container_width=True):
+                        with st.spinner("Buscando en TPB..."):
+                            torrents = find_movie_torrents(movie["title"], movie["year"])
+                        st.session_state[f"torrents_{key}"] = torrents
+
+                    torrents = st.session_state.get(f"torrents_{key}", None)
+                    if torrents is not None:
+                        _render_torrents(torrents, movie, movies_dir,
+                                         show_blocked=False, key_prefix=key)
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # TAB 3 — Resultados guardados
+    # ═══════════════════════════════════════════════════════════════════════════
+    with tab_resultados:
+        mag_path = movies_dir / "magnets_movies.txt"
+        rep_path = movies_dir / "movies_report.json"
+
+        col_m, col_r = st.columns(2)
+        with col_m:
+            if mag_path.exists():
+                content = mag_path.read_text(encoding="utf-8")
+                n_mag = content.count("magnet:")
+                st.metric("🔗 Magnet links guardados", n_mag)
+                with open(mag_path, "rb") as f:
+                    st.download_button("⬇ Descargar magnets_movies.txt",
+                                       f.read(), "magnets_movies.txt",
+                                       use_container_width=True)
+            else:
+                st.info("Aún no hay magnets guardados.")
+
+        with col_r:
+            if rep_path.exists():
+                with open(rep_path) as f:
+                    report = _json.load(f)
+                n_movies   = len(report)
+                n_with_tor = sum(1 for r in report if r.get("torrents"))
+                st.metric("🎬 Películas en reporte", n_movies)
+                st.metric("✅ Con torrents encontrados", n_with_tor)
+            else:
+                st.info("Sin reporte aún.")
+
+        if rep_path.exists():
+            st.markdown("---")
+            search_r = st.text_input("🔎 Filtrar por título", key="mov_rep_search")
+            with open(rep_path) as f:
+                report = _json.load(f)
+            filtered = [r for r in report
+                        if not search_r or search_r.lower() in r["movie"]["title"].lower()]
+
+            for entry in filtered[:60]:
+                m = entry["movie"]
+                torrents = entry.get("torrents", [])
+                best = torrents[0] if torrents else None
+                with st.container(border=True):
+                    c1, c2 = st.columns([4, 2])
+                    with c1:
+                        rating_stars = "⭐" * int(m["rating"] / 2)
+                        st.markdown(f"**{m['title']}** ({m['year']}) {rating_stars}")
+                        if best:
+                            st.caption(
+                                f"{best['lang_icon']}  ·  {best['q_label']}  ·  "
+                                f"{best['seed_icon']} {best['seeds']} seeds  ·  {best['size']}"
+                            )
+                        else:
+                            st.caption("Sin torrents registrados")
+                    with c2:
+                        if best:
+                            st.code(best["magnet"][:60] + "...", language="")
+
+
+# ─── Helpers de renderizado ───────────────────────────────────────────────────
+
+def _render_movie_card(movie: dict, compact: bool = False):
+    """Tarjeta visual de una película con datos de TMDB."""
+    col_poster, col_info = st.columns([1, 4])
+    with col_poster:
+        if movie.get("poster"):
+            st.image(movie["poster"], width=90 if compact else 130)
+        else:
+            st.markdown(
+                '<div style="width:90px;height:130px;background:rgba(120,80,255,0.12);'
+                'border-radius:8px;display:flex;align-items:center;justify-content:center;'
+                'font-size:2rem;">🎬</div>',
+                unsafe_allow_html=True,
+            )
+    with col_info:
+        stars = "⭐" * max(1, round(movie["rating"] / 2))
+        lang_tag = ("🇲🇽" if movie.get("language") in ("es",) else "🌐")
+        st.markdown(
+            f"**{movie['title']}**"
+            + (f"  ·  *{movie['title_orig']}*" if movie.get("title_orig") and
+               movie["title_orig"] != movie["title"] else "")
+        )
+        st.markdown(
+            f'<span class="mh-badge mh-badge-purple">{movie.get("year","")}</span> '
+            f'<span class="mh-badge mh-badge-yellow">⭐ {movie["rating"]}</span> '
+            f'<span class="mh-badge mh-badge-blue">{lang_tag} {movie.get("language","").upper()}</span> '
+            f'<span class="mh-badge mh-badge-green">{movie.get("votes",0):,} votos</span>',
+            unsafe_allow_html=True,
+        )
+        if movie.get("overview") and not compact:
+            st.markdown(
+                f'<div style="color:#8888b0;font-size:0.87rem;margin-top:8px;line-height:1.6;">'
+                f'{movie["overview"]}</div>',
+                unsafe_allow_html=True,
+            )
+
+
+def _render_torrents(torrents: list, movie: dict, movies_dir: Path,
+                     show_blocked: bool, key_prefix: str):
+    """Renderiza la lista de torrents con badges de calidad e idioma."""
+    good    = [t for t in torrents if not t["blocked"]]
+    blocked = [t for t in torrents if t["blocked"]]
+
+    if not good and not blocked:
+        st.warning("Sin torrents encontrados en The Pirate Bay.")
+        return
+
+    # Resumen rápido
+    has_lat = any(t["s_score"] == 2 for t in good)
+    has_esp = any(t["s_score"] >= 1 for t in good)
+    has_hd  = any("1080p" in t["q_label"] or "720p" in t["q_label"] for t in good)
+
+    pills = []
+    if has_lat:  pills.append('<span class="mh-badge mh-badge-green">🇲🇽 Latino disponible</span>')
+    elif has_esp:pills.append('<span class="mh-badge mh-badge-blue">🌎 Español disponible</span>')
+    if has_hd:   pills.append('<span class="mh-badge mh-badge-purple">🎥 HD disponible</span>')
+    if pills:
+        st.markdown(" ".join(pills), unsafe_allow_html=True)
+
+    mag_path = movies_dir / "magnets_movies.txt"
+
+    for i, t in enumerate(good):
+        key = f"{key_prefix}_t{i}"
+
+        # Color de fondo según idioma
+        if t["s_score"] == 2:
+            border_color = "rgba(52,211,153,0.3)"
+            bg_color     = "rgba(52,211,153,0.05)"
+        elif t["s_score"] == 1:
+            border_color = "rgba(96,165,250,0.3)"
+            bg_color     = "rgba(96,165,250,0.05)"
+        else:
+            border_color = "rgba(120,80,255,0.2)"
+            bg_color     = "rgba(120,80,255,0.04)"
+
+        with st.container(border=True):
+            col_info, col_meta, col_btn = st.columns([5, 3, 2])
+
+            with col_info:
+                st.markdown(
+                    f'<div style="font-weight:600;font-size:0.88rem;'
+                    f'color:#e2e2f0;margin-bottom:4px;">{t["name"][:90]}</div>',
+                    unsafe_allow_html=True,
+                )
+
+            with col_meta:
+                # Ícono seeds
+                seed_txt = f"{t['seed_icon']} {t['seeds']} seeds"
+                lch_txt  = f"· {t['leeches']} leechers"
+
+                st.markdown(
+                    f'<div style="font-size:0.8rem;color:#8888b0;">'
+                    f'{t["lang_icon"]}<br>'
+                    f'<span class="mh-badge mh-badge-purple" style="font-size:0.7rem;">'
+                    f'{t["q_label"]}</span><br>'
+                    f'<span style="color:#55558a;">{seed_txt} {lch_txt}</span><br>'
+                    f'<span style="color:#44448a;">💾 {t["size"]}</span>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+
+            with col_btn:
+                # Guardar magnet
+                if st.button("💾 Guardar magnet", key=f"mag_{key}",
+                             use_container_width=True,
+                             help="Agrega el magnet link al archivo"):
+                    with open(mag_path, "a", encoding="utf-8") as f:
+                        f.write(f"# {movie['title']} ({movie['year']}) — {t['q_label']}\n")
+                        f.write(f"{t['magnet']}\n\n")
+                    st.toast(f"✅ Magnet guardado para {movie['title']}", icon="💾")
+
+                # Copiar magnet (muestra el link)
+                if st.button("🔗 Ver magnet", key=f"show_{key}",
+                             use_container_width=True):
+                    st.session_state[f"show_mag_{key}"] = not st.session_state.get(f"show_mag_{key}", False)
+
+            if st.session_state.get(f"show_mag_{key}"):
+                st.code(t["magnet"], language="")
+
+    if show_blocked and blocked:
+        with st.expander(f"🚫 Bloqueados por calidad (CAM/TS/HDCAM) — {len(blocked)}"):
+            st.caption("Estos resultados se filtraron por ser grabaciones de cine o calidad muy baja.")
+            for t in blocked:
+                st.caption(f"🚫 {t['name'][:80]}  —  {t['seeds']} seeds")
 
 
 def page_explorador():
@@ -2239,6 +2644,7 @@ with st.sidebar:
     pages = [
         ("🏠 Inicio",            "🏠"),
         ("🎵 Música",            "🎵"),
+        ("🎬 Películas",         "🎬"),
         ("📚 Ebooks",            "📚"),
         ("🟢 Mi Spotify",        "🟢"),
         ("🔧 Fix Metadata",      "🔧"),
@@ -2262,6 +2668,7 @@ with st.sidebar:
 {
     "🏠 Inicio":             page_inicio,
     "🎵 Música":             page_musica,
+    "🎬 Películas":          page_peliculas,
     "📚 Ebooks":             page_ebooks,
     "🟢 Mi Spotify":         page_spotify,
     "🔧 Fix Metadata":       page_metadata,
