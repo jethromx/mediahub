@@ -120,6 +120,77 @@ def _tpb_search_cached(q: str, cat: int, n: int) -> list:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Helpers compartidos de música  (tab Canciones de Spotify + búsqueda directa)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _size_human(b) -> str:
+    try:
+        b = int(b)
+        for u in ("B", "KB", "MB", "GB"):
+            if b < 1024:
+                return f"{b:.0f} {u}"
+            b /= 1024
+        return f"{b:.1f} TB"
+    except Exception:
+        return "?"
+
+
+def _build_magnet(info_hash: str, name: str) -> str:
+    tr = ("tr=udp%3A%2F%2Ftracker.openbittorrent.com%3A6969%2Fannounce"
+          "&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce"
+          "&tr=udp%3A%2F%2Fopen.demonii.com%3A1337%2Fannounce")
+    return f"magnet:?xt=urn:btih:{info_hash}&dn={_uparse_mod.quote(name)}&{tr}"
+
+
+def _knaben_search_music(q: str, n: int = 12) -> list:
+    try:
+        url = "https://knaben.eu/api/v1/search?" + _uparse_mod.urlencode({
+            "search": q, "categories": "audio",
+            "orderBy": "seeders", "orderType": "desc", "size": n,
+        })
+        req = _ureq_mod.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with _ureq_mod.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read())
+        hits = data.get("hits") or []
+        out = []
+        for h in hits:
+            ih    = (h.get("info_hash") or "").lower()
+            name  = h.get("title") or h.get("name") or ""
+            seeds = int(h.get("seeders") or 0)
+            size_b = int(h.get("bytes") or 0)
+            if not ih or not name:
+                continue
+            out.append({"name": name, "seeders": seeds, "size": size_b, "info_hash": ih})
+        return out[:n]
+    except Exception:
+        return []
+
+
+def _expand_music_queries(q: str) -> list:
+    import unicodedata as _ud
+    variants = [q]
+    no_acc = "".join(c for c in _ud.normalize("NFKD", q) if _ud.category(c) != "Mn")
+    if no_acc.lower() != q.lower():
+        variants.append(no_acc)
+    base = no_acc if no_acc.lower() != q.lower() else q
+    variants.append(base + " discography")
+    words = q.strip().split()
+    if len(words) >= 2:
+        variants.append(words[0])
+    return list(dict.fromkeys(v.strip() for v in variants if v.strip()))
+
+
+def _best_torrent(results: list):
+    with_seeds = [r for r in results if int(r.get("seeders", 0)) > 0]
+    if not with_seeds:
+        return None
+    quality = [r for r in with_seeds
+               if any(k in r.get("name", "").upper() for k in ("320", "MP3"))]
+    pool = quality if quality else with_seeds
+    return max(pool, key=lambda r: int(r.get("seeders", 0)))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Utilidades UI
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -208,8 +279,9 @@ def page_inicio():
         </div>
         <div style="color:#a8a8cc;font-size:1rem;max-width:580px;line-height:1.8;">
             Tu biblioteca de <strong style="color:#c4b5fd;">música</strong>,
-            <strong style="color:#60a5fa;">películas</strong> y
-            <strong style="color:#34d399;">ebooks</strong>,
+            <strong style="color:#60a5fa;">películas</strong>,
+            <strong style="color:#34d399;">ebooks</strong> y
+            <strong style="color:#fb923c;">ROMs</strong>,
             completamente local y sin suscripciones.<br>
             Descarga, organiza y limpia — todo desde tu máquina.
         </div>
@@ -219,6 +291,7 @@ def page_inicio():
             <span class="mh-badge mh-badge-green">Películas Latino MX</span>
             <span class="mh-badge mh-badge-yellow">Fix Metadata</span>
             <span class="mh-badge mh-badge-red">Kindle Ready</span>
+            <span class="mh-badge mh-badge-orange">🎮 Miyoo A30</span>
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -305,6 +378,24 @@ def page_inicio():
                          key=f"home_{page_key}", type="primary"):
                 st.session_state.page = page_key
                 st.rerun()
+
+    # ── ROMs card ─────────────────────────────────────────────────────────────
+    col_rom, col_rom_spacer = st.columns([1, 3])
+    with col_rom:
+        st.markdown(
+            '<div class="mh-module-card">'
+            '  <span class="mh-mc-icon">🎮</span>'
+            '  <span class="mh-mc-tag mh-mc-tag-dl">Descarga</span>'
+            '  <div class="mh-mc-title">ROMs</div>'
+            '  <div class="mh-mc-desc">Busca ROMs para <b>Miyoo A30</b> y otras consolas — '
+            'GBA, SNES, PS1, Genesis y más. No-Intro · Redump · Archive.org</div>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+        if st.button("Abrir ROMs", use_container_width=True,
+                     key="home_🎮 ROMs", type="primary"):
+            st.session_state.page = "🎮 ROMs"
+            st.rerun()
 
     # ── Sección BIBLIOTECA ────────────────────────────────────────────────────
     st.markdown('<div class="mh-section-title">Gestión de biblioteca</div>',
@@ -493,27 +584,15 @@ def page_musica():
             else:
                 status.error("❌ El script terminó con errores")
 
-    # ── Tab 2: Búsqueda directa en TPB ───────────────────────────────────────
+    # ── Tab 2: Búsqueda directa multi-fuente ─────────────────────────────────
     with tab2:
-        st.markdown("Busca cualquier artista o canción directamente en **The Pirate Bay** y descarga el `.torrent`.")
+        st.markdown(
+            "Busca música en **BitSearch**, **Knaben DHT**, **SolidTorrents** y **The Pirate Bay**. "
+            "Activa **Búsqueda ampliada** para probar automáticamente variantes sin acentos, "
+            "apellido solo y sufijo *discografia* — ideal para Vicente Fernández, Juan Gabriel, etc."
+        )
 
-        col_q, col_cat, col_fmt = st.columns([3, 1, 1])
-        with col_q:
-            query = st.text_input("Artista, canción o álbum",
-                                  placeholder="ej: Metallica, Bohemian Rhapsody, The Wall...",
-                                  key="tpb_query")
-        with col_cat:
-            categoria = st.selectbox("Categoría", ["MP3", "Música (todo)", "Todas"], key="tpb_cat")
-        with col_fmt:
-            # Feature #13: allow FLAC-specific suffix in query
-            fmt_suffix = st.selectbox("Formato", ["Auto", "MP3", "FLAC"], key="tpb_fmt_suffix")
-
-        cat_map = {"MP3": 101, "Música (todo)": 100, "Todas": 0}
-        n_resultados = st.slider("Número de resultados", 3, 20, 8, key="tpb_n")
-
-        buscar = st.button("Buscar en The Pirate Bay", type="primary",
-                           use_container_width=True, disabled=not query)
-
+        # ── Helpers ──────────────────────────────────────────────────────────
         def _size_human_music(b):
             try:
                 b = int(b)
@@ -527,50 +606,237 @@ def page_musica():
             ih   = r.get("info_hash","")
             name = _uparse_mod.quote(r.get("name",""))
             tr   = ("tr=udp%3A%2F%2Ftracker.openbittorrent.com%3A6969%2Fannounce"
-                    "&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce")
+                    "&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce"
+                    "&tr=udp%3A%2F%2Fopen.demonii.com%3A1337%2Fannounce")
             return f"magnet:?xt=urn:btih:{ih}&dn={name}&{tr}"
+
+        def _knaben_music(q, n=12):
+            try:
+                url = "https://knaben.eu/api/v1/search?" + _uparse_mod.urlencode({
+                    "search": q, "categories": "audio",
+                    "orderBy": "seeders", "orderType": "desc", "size": n,
+                })
+                req = _ureq_mod.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                with _ureq_mod.urlopen(req, timeout=10) as r:
+                    data = json.loads(r.read())
+                hits = data.get("hits") or []
+                out  = []
+                for h in hits:
+                    ih    = (h.get("info_hash") or "").lower()
+                    name  = h.get("title") or h.get("name") or ""
+                    seeds = int(h.get("seeders") or 0)
+                    peers = int(h.get("leechers") or 0)
+                    size_b= int(h.get("bytes") or 0)
+                    if not ih or not name:
+                        continue
+                    out.append({"name": name, "seeders": seeds, "leechers": peers,
+                                "size": size_b, "info_hash": ih, "source": "Knaben"})
+                return out[:n]
+            except Exception:
+                return []
+
+        def _solid_music(q, n=12):
+            try:
+                url = "https://solidtorrents.to/api/v1/search?" + _uparse_mod.urlencode({
+                    "q": q, "sort": "seeders", "category": "music", "size": n,
+                })
+                req = _ureq_mod.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                with _ureq_mod.urlopen(req, timeout=8) as r:
+                    data = json.loads(r.read())
+                hits = (data.get("hits") or {}).get("hits") or data.get("results") or []
+                out  = []
+                for h in hits:
+                    src   = h.get("_source") or h
+                    ih    = (src.get("infohash") or src.get("info_hash") or "").lower()
+                    name  = src.get("title") or src.get("name") or ""
+                    swarm = src.get("swarm") or {}
+                    seeds = int(swarm.get("seeders") or src.get("seeders") or 0)
+                    peers = int(swarm.get("leechers") or src.get("leechers") or 0)
+                    size_b= int(src.get("size") or 0)
+                    if not ih or not name:
+                        continue
+                    out.append({"name": name, "seeders": seeds, "leechers": peers,
+                                "size": size_b, "info_hash": ih, "source": "Solid"})
+                return out[:n]
+            except Exception:
+                return []
+
+        def _bitsearch_music(q, n=20):
+            try:
+                url = "https://bitsearch.to/api/v1/search?" + _uparse_mod.urlencode({
+                    "q": q, "category": "music", "subcat": "", "page": 1,
+                })
+                req = _ureq_mod.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
+                with _ureq_mod.urlopen(req, timeout=10) as r:
+                    data = json.loads(r.read())
+                hits = data.get("results") or data.get("hits") or []
+                out  = []
+                for h in hits:
+                    ih    = (h.get("infoHash") or h.get("info_hash") or h.get("infohash") or "").lower()
+                    name  = h.get("name") or h.get("title") or ""
+                    stats = h.get("stats") or {}
+                    seeds = int(stats.get("seeders") or h.get("seeders") or 0)
+                    peers = int(stats.get("leechers") or h.get("leechers") or 0)
+                    size_b= int(h.get("size") or 0)
+                    if not ih or not name:
+                        continue
+                    out.append({"name": name, "seeders": seeds, "leechers": peers,
+                                "size": size_b, "info_hash": ih, "source": "BitSearch"})
+                return out[:n]
+            except Exception:
+                return []
+
+        def _expand_queries(q):
+            """Genera variantes del query para mejor cobertura de música latina."""
+            import unicodedata as _ud
+            variants = [q]
+            # Sin acentos
+            no_acc = "".join(c for c in _ud.normalize("NFKD", q) if _ud.category(c) != "Mn")
+            if no_acc.lower() != q.lower():
+                variants.append(no_acc)
+            # Apellido/palabra clave + discografia
+            words = q.strip().split()
+            base  = no_acc if no_acc.lower() != q.lower() else q
+            if "discografia" not in q.lower() and "discography" not in q.lower():
+                variants.append(base + " discografia")
+                # Solo apellido (última palabra) + discografia, útil para "Vicente Fernandez" → "Fernandez discografia"
+                if len(words) >= 2:
+                    variants.append(words[-1] + " discografia")
+                # Solo apellido solo
+                if len(words) >= 2:
+                    variants.append(words[-1])
+            return list(dict.fromkeys(v.strip() for v in variants if v.strip()))
+
+        # ── Controles de búsqueda ─────────────────────────────────────────────
+        col_q, col_src = st.columns([3, 1])
+        with col_q:
+            query = st.text_input(
+                "Artista, canción o álbum",
+                placeholder="ej: Vicente Fernandez, ranchera discografia, Banda MS...",
+                key="tpb_query",
+            )
+        with col_src:
+            fuente_mus = st.selectbox(
+                "Fuente",
+                ["Todas 🔍", "BitSearch 🎵", "Knaben DHT 🔗", "SolidTorrents 🌐", "The Pirate Bay 🏴"],
+                key="mus_fuente",
+                help="BitSearch, Knaben y SolidTorrents tienen mejor cobertura de música latina y ranchera.",
+            )
+
+        col_cat, col_fmt = st.columns(2)
+        with col_cat:
+            categoria = st.selectbox(
+                "Categoría (TPB)", ["MP3", "Música (todo)", "Todas"], key="tpb_cat",
+                help="Solo aplica a The Pirate Bay.",
+            )
+        with col_fmt:
+            fmt_suffix = st.selectbox("Formato", ["Auto", "MP3", "FLAC"], key="tpb_fmt_suffix")
+
+        cat_map     = {"MP3": 101, "Música (todo)": 100, "Todas": 0}
+        col_sl, col_exp = st.columns([3, 1])
+        with col_sl:
+            n_resultados = st.slider("Resultados por fuente", 5, 50, 20, key="tpb_n")
+        with col_exp:
+            expandir = st.toggle(
+                "Búsqueda ampliada",
+                value=True,
+                key="mus_expandir",
+                help="Prueba automáticamente variantes: sin acentos, + discografia, solo apellido. Ideal para artistas latinos.",
+            )
+
+        # ── Sugerencias para ranchera / música latina ─────────────────────────
+        SUGERENCIAS_LAT = [
+            "Vicente Fernandez discografia", "Juan Gabriel discografia",
+            "Banda MS discografia", "Grupo Montez de Durango",
+            "Los Bukis discografia", "Marco Antonio Solis",
+            "Jenni Rivera discografia", "Pepe Aguilar discografia",
+            "Mariachi Vargas", "Los Tigres del Norte discografia",
+            "Lupillo Rivera", "Chalino Sanchez",
+            "Norteñas mix", "Rancheras clasicas mix", "Banda sinaloense mix",
+        ]
+        def _set_mus_query(sug):
+            st.session_state["tpb_query"] = sug
+
+        with st.expander("💡 Sugerencias de búsqueda — Ranchera & Banda"):
+            sug_cols = st.columns(3)
+            for j, sug in enumerate(SUGERENCIAS_LAT):
+                sug_cols[j % 3].button(
+                    sug, key=f"sug_{j}",
+                    on_click=_set_mus_query, args=(sug,),
+                    use_container_width=True,
+                )
+
+        buscar = st.button("🔍 Buscar música", type="primary",
+                           use_container_width=True, disabled=not query)
 
         if buscar and query:
             TORRENT_SOURCES = [
                 "https://itorrents.org/torrent/{ih}.torrent",
                 "https://torcache.net/torrent/{ih}.torrent",
             ]
+            effective_query = f"{query} {fmt_suffix}" if fmt_suffix != "Auto" else query
 
-            # Append format suffix to query if not Auto
-            effective_query = query
-            if fmt_suffix != "Auto":
-                effective_query = f"{query} {fmt_suffix}"
+            usar_tpb       = fuente_mus in ("Todas 🔍", "The Pirate Bay 🏴")
+            usar_knaben    = fuente_mus in ("Todas 🔍", "Knaben DHT 🔗")
+            usar_solid     = fuente_mus in ("Todas 🔍", "SolidTorrents 🌐")
+            usar_bitsearch = fuente_mus in ("Todas 🔍", "BitSearch 🎵")
 
-            # Feature #11: use cached search
-            with st.spinner(f"Buscando «{effective_query}» en The Pirate Bay..."):
-                resultados = _tpb_search_cached(effective_query, cat_map[categoria], n_resultados)
+            # Queries a ejecutar: query principal + variantes si expandir está activo
+            queries_to_run = _expand_queries(effective_query) if expandir else [effective_query]
+
+            tpb_res, knaben_res, solid_res, bits_res = [], [], [], []
+            with st.spinner(f"Buscando «{effective_query}»… ({len(queries_to_run)} variante(s))"):
+                for q_var in queries_to_run:
+                    if usar_tpb and len(tpb_res) < n_resultados:
+                        raw = _tpb_search_cached(q_var, cat_map[categoria], n_resultados)
+                        tpb_res += [{**r, "source": "TPB"} for r in raw]
+                    if usar_knaben and len(knaben_res) < n_resultados:
+                        knaben_res += _knaben_music(q_var, n_resultados)
+                    if usar_solid and len(solid_res) < n_resultados:
+                        solid_res += _solid_music(q_var, n_resultados)
+                    if usar_bitsearch and len(bits_res) < n_resultados:
+                        bits_res += _bitsearch_music(q_var, n_resultados)
+
+            # Deduplicar por info_hash, ordenar por seeds
+            seen, resultados = set(), []
+            for r in bits_res + knaben_res + solid_res + tpb_res:
+                ih = r.get("info_hash", "")
+                if ih and ih in seen:
+                    continue
+                seen.add(ih)
+                resultados.append(r)
+            resultados.sort(key=lambda r: int(r.get("seeders", 0)), reverse=True)
 
             if not resultados:
-                st.warning("Sin resultados. Prueba con otra búsqueda o categoría.")
+                st.warning("Sin resultados. Prueba con otro artista, amplía la fuente, o usa una sugerencia de arriba.")
             else:
-                st.success(f"✅ {len(resultados)} resultados para **{query}**")
+                src_counts = {}
+                for r in resultados:
+                    src_counts[r.get("source","?")] = src_counts.get(r.get("source","?"), 0) + 1
+                badges = " · ".join(f"**{v}** {k}" for k, v in src_counts.items())
+                st.success(f"✅ {len(resultados)} resultados — {badges}")
 
                 torrents_dir = BASE_DIR / "output" / "torrents"
                 torrents_dir.mkdir(parents=True, exist_ok=True)
 
                 for i, r in enumerate(resultados):
-                    name  = r.get("name","")
-                    seeds = int(r.get("seeders", 0))
+                    name    = r.get("name","")
+                    seeds   = int(r.get("seeders", 0))
                     leeches = int(r.get("leechers", 0))
-                    size  = _size_human_music(r.get("size", 0))
-                    ih    = r.get("info_hash","")
-                    mag   = _magnet_music(r)
+                    size    = _size_human_music(r.get("size", 0))
+                    ih      = r.get("info_hash","")
+                    mag     = _magnet_music(r)
+                    source  = r.get("source", "TPB")
 
-                    # Color según seeds
-                    if seeds >= 20:   seed_color = "🟢"
-                    elif seeds >= 5:  seed_color = "🟡"
-                    else:             seed_color = "🔴"
+                    seed_color = "🟢" if seeds >= 20 else ("🟡" if seeds >= 5 else "🔴")
+                    src_badge  = {"TPB": "🏴 TPB", "Knaben": "🔗 Knaben", "Solid": "🌐 Solid", "BitSearch": "🎵 BitSearch"}.get(source, source)
 
                     with st.container(border=True):
                         col_info, col_meta, col_btns = st.columns([4, 2, 2])
 
                         with col_info:
                             st.markdown(f"**{name[:80]}**")
+                            st.caption(src_badge)
 
                         with col_meta:
                             st.caption(f"{seed_color} {seeds} seeds · {leeches} leechers")
@@ -586,18 +852,16 @@ def page_musica():
                                 if dest.exists():
                                     with open(dest, "rb") as fh:
                                         st.download_button("⬇ .torrent", fh.read(), fname,
-                                                           key=f"dl_s_{i}", use_container_width=True,
-                                                           help="Ya descargado — clic para guardar")
-                                else:
+                                                           key=f"dl_s_{i}", use_container_width=True)
+                                elif ih:
                                     if st.button("⬇ Guardar", key=f"save_{i}",
-                                                 use_container_width=True, help="Descargar .torrent"):
+                                                 use_container_width=True, help="Descargar .torrent por hash"):
                                         try:
-                                            ih_up = ih.upper()
                                             saved = False
                                             for tpl in TORRENT_SOURCES:
                                                 try:
                                                     req = _ureq_mod.Request(
-                                                        tpl.format(ih=ih_up),
+                                                        tpl.format(ih=ih.upper()),
                                                         headers={"User-Agent": "Mozilla/5.0"})
                                                     with _ureq_mod.urlopen(req, timeout=10) as resp:
                                                         data = resp.read()
@@ -613,28 +877,25 @@ def page_musica():
                                                 st.error("Sin servidor disponible")
                                         except Exception as ex:
                                             st.error(f"Error: {ex}")
+                                else:
+                                    st.caption("Sin hash")
                             with col_mag:
-                                st.link_button("🧲 Magnet", _magnet_music(r),
-                                               use_container_width=True,
-                                               help="Abrir magnet link en uTorrent")
+                                st.link_button("🧲 Magnet", mag, use_container_width=True,
+                                               help="Abrir en uTorrent / qBittorrent")
 
-            # Feature #12: export to CSV
+            # CSV export
             import io as _io, csv as _csv
             csv_buf = _io.StringIO()
-            writer = _csv.writer(csv_buf)
-            writer.writerow(["nombre", "seeds", "leechers", "tamaño", "info_hash"])
+            writer  = _csv.writer(csv_buf)
+            writer.writerow(["nombre","fuente","seeds","leechers","tamaño","info_hash"])
             for r in resultados:
-                writer.writerow([
-                    r.get("name",""), r.get("seeders",0), r.get("leechers",0),
-                    _size_human_music(r.get("size",0)), r.get("info_hash",""),
-                ])
+                writer.writerow([r.get("name","")[:80], r.get("source",""),
+                                 r.get("seeders",0), r.get("leechers",0),
+                                 _size_human_music(r.get("size",0)), r.get("info_hash","")])
             st.download_button(
-                "Exportar resultados a CSV",
-                csv_buf.getvalue().encode(),
-                file_name=f"tpb_{query[:30].replace(' ','_')}.csv",
-                mime="text/csv",
-                use_container_width=True,
-                key="mus_csv_export",
+                "Exportar resultados a CSV", csv_buf.getvalue().encode(),
+                file_name=f"musica_{query[:30].replace(' ','_')}.csv",
+                mime="text/csv", use_container_width=True, key="mus_csv_export",
             )
 
     # ── Tab 3: Resultados anteriores ─────────────────────────────────────────
@@ -832,6 +1093,64 @@ def page_ebooks():
         keep = set(" ._-()[]")
         return "".join(c if (c.isalnum() or c in keep) else "_" for c in name)[:80].strip()
 
+    def _libgen_search(q, n=10, lang_es=False, fmt=None):
+        """Search Library Genesis. Returns list of book dicts with direct download links."""
+        import re
+        params = {"req": q, "res": min(n, 25), "phrase": 1,
+                  "column": "def", "lg_topic": "libgen", "open": 0, "view": "simple"}
+        if lang_es:
+            params["language"] = "Spanish"
+        mirrors = ["https://libgen.is", "https://libgen.rs", "https://libgen.st"]
+        strip_tags = lambda s: re.sub(r'<[^>]+>', '', s).strip()
+        for mirror in mirrors:
+            try:
+                url = f"{mirror}/search.php?" + _uparse.urlencode(params)
+                req = _ureq.Request(url, headers={"User-Agent": "Mozilla/5.0 (compatible)"})
+                with _ureq.urlopen(req, timeout=15) as r:
+                    html = r.read().decode("utf-8", errors="ignore")
+                books = []
+                rows = re.findall(r'<tr[^>]*valign=["\']?top["\']?[^>]*>(.*?)</tr>', html, re.DOTALL | re.I)
+                for row in rows:
+                    cells = re.findall(r'<td[^>]*>(.*?)</td>', row, re.DOTALL | re.I)
+                    if len(cells) < 9:
+                        continue
+                    id_ = strip_tags(cells[0])
+                    if not id_.isdigit():
+                        continue
+                    author = strip_tags(cells[1])[:80]
+                    title_m = re.search(r'<a[^>]+>(.*?)</a>', cells[2], re.DOTALL | re.I)
+                    title = strip_tags(title_m.group(1) if title_m else cells[2])[:120]
+                    publisher = strip_tags(cells[3])[:60]
+                    year = strip_tags(cells[4])
+                    language = strip_tags(cells[6])
+                    size = strip_tags(cells[7])
+                    ext = strip_tags(cells[8]).lower()
+                    md5 = ""
+                    for c in cells[9:]:
+                        m = re.search(r'[?&]md5=([a-fA-F0-9]{32})', c, re.I)
+                        if m:
+                            md5 = m.group(1).upper()
+                            break
+                    if not md5:
+                        m = re.search(r'md5=([a-fA-F0-9]{32})', cells[2], re.I)
+                        if m:
+                            md5 = m.group(1).upper()
+                    if not title:
+                        continue
+                    if fmt and fmt != "Todos" and ext != fmt.lower():
+                        continue
+                    books.append({
+                        "title": title, "author": author, "year": year,
+                        "language": language, "size": size,
+                        "ext": ext or "?", "md5": md5,
+                        "dl_url": f"http://library.lol/main/{md5}" if md5 else "",
+                    })
+                if books:
+                    return books[:n]
+            except Exception:
+                continue
+        return []
+
     # Leyenda seeds (se muestra en varias pestañas)
     SEED_LEGEND = (
         "🟢 **≥20 seeds** — descarga rápida  ·  "
@@ -877,28 +1196,53 @@ def page_ebooks():
 
     # ── Tab 2: búsqueda directa ───────────────────────────────────────────────
     with tab2:
-        st.markdown("Busca cualquier libro, autor o colección directamente en **The Pirate Bay**.")
-
+        st.markdown(
+            "Busca libros en **The Pirate Bay** (torrents) y/o **Library Genesis** "
+            "(descarga directa — EPUB, PDF, MOBI). Library Genesis tiene cobertura "
+            "mucho mayor, especialmente en español."
+        )
         st.caption(SEED_LEGEND)
         st.markdown("---")
 
-        col_q, col_cat = st.columns([3, 1])
+        # ── Controles de búsqueda ──────────────────────────────────────────
+        col_q, col_src = st.columns([3, 1])
         with col_q:
             query_eb = st.text_input(
                 "📖 Título, autor o colección",
-                placeholder="ej: Gabriel García Márquez, Harry Potter, Stephen King epub...",
+                placeholder="ej: Gabriel García Márquez, Sapiens, Stephen King...",
                 key="eb_query",
+            )
+        with col_src:
+            fuente_eb = st.selectbox(
+                "Fuente",
+                ["Library Genesis 📚", "The Pirate Bay 🏴", "Ambas fuentes 🔍"],
+                key="eb_fuente",
+                help="Library Genesis: descarga directa (EPUB/PDF/MOBI). TPB: torrent.",
+            )
+
+        col_lang, col_fmt, col_cat = st.columns(3)
+        with col_lang:
+            solo_es = st.checkbox(
+                "Solo en español 🇪🇸", value=False, key="eb_es",
+                help="Filtra resultados por idioma español. Muy efectivo en Library Genesis.",
+            )
+        with col_fmt:
+            fmt_eb = st.selectbox(
+                "Formato (LibGen)",
+                ["Todos", "EPUB", "PDF", "MOBI", "AZW3"],
+                key="eb_fmt",
+                help="Filtra por formato de archivo en Library Genesis.",
             )
         with col_cat:
             cat_eb = st.selectbox(
-                "Categoría",
+                "Categoría (TPB)",
                 ["Ebooks (601)", "Todas"],
                 key="eb_cat",
-                help="601 = categoría oficial de ebooks en TPB",
+                help="Categoría de búsqueda en The Pirate Bay.",
             )
 
         cat_map_eb = {"Ebooks (601)": 601, "Todas": 0}
-        n_eb = st.slider("Número de resultados", 3, 20, 8, key="eb_n")
+        n_eb = st.slider("Resultados por fuente", 3, 20, 8, key="eb_n")
 
         buscar_eb = st.button("🔍 Buscar", type="primary",
                               use_container_width=True, disabled=not query_eb)
@@ -907,15 +1251,69 @@ def page_ebooks():
             torrents_dir_eb = BASE_DIR / "output_ebooks" / "torrents"
             torrents_dir_eb.mkdir(parents=True, exist_ok=True)
 
-            with st.spinner(f"Buscando «{query_eb}» en The Pirate Bay..."):
-                res_eb = _eb_search(query_eb, cat_map_eb[cat_eb], n_eb)
+            usar_libgen = fuente_eb in ("Library Genesis 📚", "Ambas fuentes 🔍")
+            usar_tpb    = fuente_eb in ("The Pirate Bay 🏴", "Ambas fuentes 🔍")
 
-            if not res_eb:
-                st.warning("Sin resultados. Prueba con otro título, autor o en categoría **Todas**.")
+            # Consulta efectiva para TPB: añadir "español" si procede
+            tpb_query = query_eb
+            if solo_es and usar_tpb:
+                tpb_query = f"{query_eb} español"
+
+            res_libgen, res_tpb = [], []
+
+            with st.spinner("Buscando…"):
+                if usar_libgen:
+                    res_libgen = _libgen_search(
+                        query_eb, n=n_eb, lang_es=solo_es,
+                        fmt=fmt_eb if fmt_eb != "Todos" else None,
+                    )
+                if usar_tpb:
+                    res_tpb = _eb_search(tpb_query, cat_map_eb[cat_eb], n_eb)
+
+            total = len(res_libgen) + len(res_tpb)
+            if total == 0:
+                st.warning("Sin resultados. Prueba con otro título, amplía la fuente o desactiva el filtro de español.")
             else:
-                st.success(f"✅ {len(res_eb)} resultados para **{query_eb}**")
+                st.success(f"✅ {total} resultados para **{query_eb}**"
+                           + (" (en español)" if solo_es else ""))
 
-                for i, r in enumerate(res_eb):
+            # ── Resultados Library Genesis ─────────────────────────────────
+            if res_libgen:
+                st.markdown(f"#### 📚 Library Genesis — {len(res_libgen)} resultados")
+                for i, b in enumerate(res_libgen):
+                    ext_badge = {
+                        "epub": "🟢 EPUB", "pdf": "🔵 PDF",
+                        "mobi": "🟠 MOBI", "azw3": "🟠 AZW3",
+                        "fb2":  "⚪ FB2",  "djvu": "⚪ DJVU",
+                    }.get(b["ext"], f"📄 {b['ext'].upper()}")
+
+                    lang_flag = "🇪🇸 " if "spanish" in b["language"].lower() or "español" in b["language"].lower() else ""
+
+                    with st.container(border=True):
+                        col_info, col_btns = st.columns([5, 2])
+                        with col_info:
+                            st.markdown(f"**{b['title']}**")
+                            meta_parts = []
+                            if b["author"]: meta_parts.append(f"✍️ {b['author']}")
+                            if b["year"]:   meta_parts.append(b["year"])
+                            meta_parts.append(f"{lang_flag}{b['language']}")
+                            meta_parts.append(f"💾 {b['size']}")
+                            meta_parts.append(ext_badge)
+                            st.caption("  ·  ".join(meta_parts))
+                        with col_btns:
+                            if b["dl_url"]:
+                                st.link_button(
+                                    "⬇ Descargar", b["dl_url"],
+                                    use_container_width=True,
+                                    help="Abre library.lol — haz clic en 'GET' para descargar el archivo directamente.",
+                                )
+                            else:
+                                st.caption("Sin enlace disponible")
+
+            # ── Resultados The Pirate Bay ──────────────────────────────────
+            if res_tpb:
+                st.markdown(f"#### 🏴 The Pirate Bay — {len(res_tpb)} resultados")
+                for i, r in enumerate(res_tpb):
                     name    = r.get("name", "")
                     seeds   = int(r.get("seeders", 0))
                     leeches = int(r.get("leechers", 0))
@@ -930,20 +1328,17 @@ def page_ebooks():
 
                     with st.container(border=True):
                         col_info, col_meta, col_btns = st.columns([4, 2, 2])
-
                         with col_info:
                             prefix = "✅ " if ya_dl else ""
                             st.markdown(f"**{prefix}{name[:80]}**")
                             if ya_dl:
                                 st.caption("💾 Ya descargado")
-
                         with col_meta:
                             st.caption(
                                 f"{emoji} {seeds} seeds · {leeches} leechers",
                                 help=f"{tip}\n\n*Leechers = personas descargando ahora*",
                             )
                             st.caption(f"📦 {size}")
-
                         with col_btns:
                             col_dl, col_mag = st.columns(2)
                             with col_dl:
@@ -952,12 +1347,11 @@ def page_ebooks():
                                         st.download_button(
                                             "⬇ .torrent", fh.read(), fname,
                                             key=f"eb_dl_{i}", use_container_width=True,
-                                            help="Ya descargado — clic para guardar en tu equipo",
                                         )
                                 else:
                                     if st.button("⬇ Guardar", key=f"eb_save_{i}",
                                                  use_container_width=True,
-                                                 help="Descarga el fichero .torrent a output_ebooks/torrents/"):
+                                                 help="Descarga el .torrent a output_ebooks/torrents/"):
                                         try:
                                             saved = False
                                             for tpl in TORRENT_SOURCES_EB:
@@ -973,16 +1367,16 @@ def page_ebooks():
                                                         break
                                                 except: continue
                                             if saved:
-                                                st.success("✅ Guardado en output_ebooks/torrents/")
+                                                st.success("✅ Guardado")
                                             else:
-                                                st.error("No disponible en servidores de caché — usa el magnet")
+                                                st.error("Sin caché disponible — usa el magnet")
                                         except Exception as ex:
                                             st.error(f"Error: {ex}")
                             with col_mag:
                                 st.link_button(
                                     "🧲 Magnet", mag,
                                     use_container_width=True,
-                                    help="Abre directamente en uTorrent sin guardar ningún fichero",
+                                    help="Abre en uTorrent sin guardar .torrent",
                                 )
 
     # ── Tab 3: resultados anteriores ──────────────────────────────────────────
@@ -2026,7 +2420,7 @@ def page_peliculas():
         from movies_export import (
             tmdb_discover, tmdb_search, tmdb_popular, tmdb_trending,
             find_movie_torrents, find_movie_torrents_combined,
-            yts_search, solidtorrents_search, GENRE_IDS, _format_movie,
+            yts_search, solidtorrents_search, knaben_search, GENRE_IDS, _format_movie,
         )
         MOVIES_OK = True
     except Exception as e:
@@ -2078,6 +2472,36 @@ def page_peliculas():
     def _tmdb_trending_c(key, limit=40):
         return tmdb_trending(key, limit=limit)
 
+    @st.cache_data(ttl=600, show_spinner=False)
+    def _yts_top_c(quality, genre, min_rating, sort_label, limit, page):
+        sort_map = {
+            "🌱 Más seeds":       "seeds",
+            "⬇️ Más descargadas": "download_count",
+            "⭐ Mejor rating":    "rating",
+            "📅 Más recientes":   "year",
+        }
+        params = {
+            "sort_by":       sort_map.get(sort_label, "seeds"),
+            "order_by":      "desc",
+            "limit":         limit,
+            "page":          page,
+            "minimum_rating": min_rating,
+        }
+        if quality != "Todas":
+            params["quality"] = {"4K": "2160p"}.get(quality, quality)
+        if genre != "Todos":
+            params["genre"] = genre
+        url = "https://yts.mx/api/v2/list_movies.json?" + _uparse_mod.urlencode(params)
+        try:
+            req = _ureq_mod.Request(url, headers={"User-Agent": "Mozilla/5.0 MediaHub/1.0"})
+            with _ureq_mod.urlopen(req, timeout=12) as r:
+                data = json.loads(r.read())
+            if data.get("status") != "ok":
+                return []
+            return (data.get("data") or {}).get("movies") or []
+        except Exception:
+            return []
+
     @st.cache_data(ttl=1800, show_spinner=False)
     def _tmdb_cult_c(key, extra_params_str, limit=40):
         import json as _j
@@ -2085,99 +2509,147 @@ def page_peliculas():
         return tmdb_discover(key, sort_by="vote_average.desc", limit=limit, extra_params=ep)
 
     # ─── Subgéneros de culto ───────────────────────────────────────────────────
+    # CULT_SUBGENRES: cada entrada usa with_keywords para géneros amplios que
+    # incluyen blockbusters, o popularity.lte para géneros inherentemente de culto.
     CULT_SUBGENRES = [
         {
             "name": "Neo-Noir",        "icon": "🌆",
             "desc": "Crimen, sombras y antihéroes",
-            "extra": {"with_genres": "80,18", "vote_average.gte": "7.0",
-                      "vote_count.gte": "200",
+            "extra": {"with_genres": "80,18",
+                      "with_keywords": "9715|9816|10349",
+                      "vote_average.gte": "6.5",
+                      "vote_count.gte": "100",
                       "primary_release_date.gte": "1960-01-01",
-                      "primary_release_date.lte": "2002-12-31"},
+                      "primary_release_date.lte": "2005-12-31"},
         },
         {
             "name": "J-Horror",        "icon": "👹",
             "desc": "Terror japonés: Ringu, Juon, Audition",
+            # Género inherentemente de culto — popularity cap en lugar de keyword
             "extra": {"with_genres": "27", "with_original_language": "ja",
-                      "vote_count.gte": "80",
-                      "primary_release_date.gte": "1990-01-01",
-                      "primary_release_date.lte": "2012-12-31"},
+                      "vote_count.gte": "50",
+                      "popularity.lte": "40",
+                      "primary_release_date.gte": "1988-01-01",
+                      "primary_release_date.lte": "2015-12-31"},
         },
         {
             "name": "Slasher Clásico", "icon": "🔪",
             "desc": "Terror slasher de los 70s y 80s",
-            "extra": {"with_genres": "27", "vote_count.gte": "80",
+            # Género inherentemente de culto
+            "extra": {"with_genres": "27",
+                      "vote_count.gte": "50",
+                      "popularity.lte": "50",
                       "primary_release_date.gte": "1974-01-01",
                       "primary_release_date.lte": "1993-12-31"},
         },
         {
             "name": "Sci-Fi Culto",    "icon": "🚀",
-            "desc": "Ciencia ficción clásica y de culto",
-            "extra": {"with_genres": "878", "vote_average.gte": "6.8",
-                      "vote_count.gte": "100",
+            "desc": "2001, Soylent Green, Dark Star — no Star Wars ni E.T.",
+            "extra": {"with_genres": "878",
+                      "with_keywords": "9715|9816|10349",
+                      "vote_average.gte": "6.0",
+                      "vote_count.gte": "80",
                       "primary_release_date.gte": "1950-01-01",
-                      "primary_release_date.lte": "1992-12-31"},
+                      "primary_release_date.lte": "1995-12-31"},
         },
         {
             "name": "Spaghetti Western", "icon": "🤠",
-            "desc": "Leone, Corbucci, Sergio Martino",
-            "extra": {"with_genres": "37", "vote_count.gte": "50",
+            "desc": "Leone, Corbucci, Django, Trinità",
+            # Género inherentemente de culto
+            "extra": {"with_genres": "37",
+                      "vote_count.gte": "30",
+                      "popularity.lte": "35",
                       "primary_release_date.gte": "1960-01-01",
                       "primary_release_date.lte": "1980-12-31"},
         },
         {
             "name": "Post-Apocalíptico", "icon": "☢️",
-            "desc": "Mad Max, Escape de NY, The Road Warrior",
-            "extra": {"with_genres": "878,28", "vote_count.gte": "80",
+            "desc": "Road Warrior, Escape de NY, Damnation Alley",
+            "extra": {"with_genres": "878,28",
+                      "with_keywords": "9715|9816|10349",
+                      "vote_count.gte": "50",
                       "primary_release_date.gte": "1975-01-01",
                       "primary_release_date.lte": "2005-12-31"},
         },
         {
             "name": "Cyberpunk",       "icon": "💻",
             "desc": "Blade Runner, Ghost in the Shell, Johnny Mnemonic",
-            "extra": {"with_genres": "878,53", "vote_count.gte": "80",
+            "extra": {"with_genres": "878,53",
+                      "with_keywords": "9715|9816|9882",   # 9882 = cyberpunk
+                      "vote_count.gte": "50",
                       "primary_release_date.gte": "1980-01-01",
                       "primary_release_date.lte": "2010-12-31"},
         },
         {
             "name": "Kung Fu / Artes Marciales", "icon": "🥋",
             "desc": "Shaw Brothers, Bruce Lee, Jackie Chan clásico",
+            # Inherentemente de culto para audiencia occidental
             "extra": {"with_genres": "28", "with_original_language": "zh",
-                      "vote_count.gte": "30",
+                      "vote_count.gte": "20",
+                      "popularity.lte": "30",
                       "primary_release_date.gte": "1965-01-01",
                       "primary_release_date.lte": "1998-12-31"},
         },
         {
             "name": "Giallo / Terror Italiano", "icon": "🔴",
             "desc": "Argento, Bava, Fulci",
+            # Inherentemente de culto
             "extra": {"with_genres": "27,53", "with_original_language": "it",
-                      "vote_count.gte": "30",
+                      "vote_count.gte": "20",
+                      "popularity.lte": "30",
                       "primary_release_date.gte": "1960-01-01",
-                      "primary_release_date.lte": "1985-12-31"},
+                      "primary_release_date.lte": "1990-12-31"},
         },
         {
             "name": "Anime Culto",     "icon": "🎌",
-            "desc": "Miyazaki, Otomo, Oshii, Satoshi Kon",
+            "desc": "Otomo, Oshii, Satoshi Kon, Madhouse",
             "extra": {"with_genres": "16", "with_original_language": "ja",
-                      "vote_average.gte": "7.0", "vote_count.gte": "100"},
+                      "with_keywords": "9715|9816",
+                      "vote_average.gte": "6.5",
+                      "vote_count.gte": "80"},
         },
         {
             "name": "Exploitation",    "icon": "🎞️",
-            "desc": "Blaxploitation, Grindhouse y drive-in de los 70s",
-            "extra": {"with_genres": "28,80", "vote_count.gte": "30",
-                      "primary_release_date.gte": "1968-01-01",
+            "desc": "Blaxploitation, Grindhouse, drive-in de los 70s",
+            "extra": {"with_genres": "28,80",
+                      "with_keywords": "9715|9816|10349",
+                      "vote_count.gte": "20",
+                      "primary_release_date.gte": "1966-01-01",
                       "primary_release_date.lte": "1985-12-31"},
         },
         {
             "name": "Peplum / Espadas & Brujería", "icon": "⚔️",
-            "desc": "Conan, Gladiadores y mitología clásica",
-            "extra": {"with_genres": "28,12,14", "vote_count.gte": "30",
+            "desc": "Conan, gladiadores italianos, mitología clásica",
+            "extra": {"with_genres": "28,12,14",
+                      "with_keywords": "9715|9816|10349",
+                      "vote_count.gte": "20",
                       "primary_release_date.gte": "1950-01-01",
-                      "primary_release_date.lte": "1988-12-31"},
+                      "primary_release_date.lte": "1990-12-31"},
+        },
+        {
+            "name": "Horror Ochentero", "icon": "🎃",
+            "desc": "Criaturas, gore y VHS de los 80s",
+            "extra": {"with_genres": "27",
+                      "with_keywords": "9715|9816|10349",
+                      "vote_count.gte": "30",
+                      "primary_release_date.gte": "1980-01-01",
+                      "primary_release_date.lte": "1989-12-31"},
+        },
+        {
+            "name": "New Wave Francesa", "icon": "🎬",
+            "desc": "Godard, Truffaut, Rohmer, Varda",
+            "extra": {"with_original_language": "fr",
+                      "with_genres": "18",
+                      "vote_count.gte": "30",
+                      "popularity.lte": "25",
+                      "primary_release_date.gte": "1958-01-01",
+                      "primary_release_date.lte": "1980-12-31"},
         },
     ]
 
     # ─── Tabs principales ─────────────────────────────────────────────────────
-    tab_buscar, tab_decadas, tab_culto, tab_rename_mov, tab_resultados, tab_watchlist, tab_subs = st.tabs([
+    tab_top, tab_buscar, tab_decadas, tab_culto, tab_rename_mov, tab_resultados, tab_watchlist, tab_subs = st.tabs([
+        "📥 Top Descargas",
         "🔎 Buscar película",
         "📅 Explorar por época / género",
         "🎭 Cine de Culto",
@@ -2189,6 +2661,144 @@ def page_peliculas():
 
     movies_dir = BASE_DIR / "output" / "movies"
     movies_dir.mkdir(parents=True, exist_ok=True)
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # TAB 0 — Top Descargas (YTS)
+    # ═══════════════════════════════════════════════════════════════════════════
+    with tab_top:
+        st.markdown(
+            "Películas con **más seeds activos ahora mismo** en YTS — "
+            "la fuente con mejor calidad BluRay/WEB-DL. "
+            "Filtra por calidad, género y rating."
+        )
+
+        YTS_GENRES = [
+            "Todos", "Action", "Adventure", "Animation", "Biography", "Comedy",
+            "Crime", "Documentary", "Drama", "Fantasy", "History", "Horror",
+            "Music", "Mystery", "Romance", "Sci-Fi", "Thriller", "War", "Western",
+        ]
+
+        col_q, col_g, col_r, col_s = st.columns(4)
+        with col_q:
+            top_quality = st.selectbox(
+                "Calidad", ["1080p", "4K", "720p", "Todas"],
+                key="top_dl_q",
+                help="1080p recomendado — mejor relación tamaño/calidad.",
+            )
+        with col_g:
+            top_genre = st.selectbox("Género", YTS_GENRES, key="top_dl_genre")
+        with col_r:
+            top_rating = st.slider("Rating mínimo ⭐", 0, 9, 6, key="top_dl_rating")
+        with col_s:
+            top_sort = st.selectbox(
+                "Ordenar por",
+                ["🌱 Más seeds", "⬇️ Más descargadas", "⭐ Mejor rating", "📅 Más recientes"],
+                key="top_dl_sort",
+            )
+
+        col_lim, col_pg = st.columns(2)
+        with col_lim:
+            top_limit = st.select_slider("Películas por página", [10, 20, 30, 50], value=20, key="top_dl_limit")
+        with col_pg:
+            top_page = st.number_input("Página", 1, 50, 1, key="top_dl_page")
+
+        col_load, col_ref = st.columns([3, 1])
+        with col_load:
+            load_top = st.button("📥 Cargar Top", type="primary", use_container_width=True, key="top_dl_btn")
+        with col_ref:
+            if st.button("🔄 Limpiar caché", use_container_width=True, key="top_dl_clear"):
+                _yts_top_c.clear()
+                st.success("Caché limpiado")
+
+        if load_top:
+            with st.spinner("Consultando YTS…"):
+                top_movies = _yts_top_c(
+                    top_quality, top_genre, top_rating, top_sort, top_limit, top_page
+                )
+            st.session_state["top_dl_results"] = top_movies
+
+        top_movies = st.session_state.get("top_dl_results")
+
+        if top_movies is not None:
+            if not top_movies:
+                st.warning("Sin resultados. Prueba con otro género o calidad.")
+            else:
+                st.success(f"✅ {len(top_movies)} películas · página {top_page}")
+                st.markdown("---")
+
+                # Trackers para construir magnets
+                _TR = (
+                    "udp%3A%2F%2Ftracker.openbittorrent.com%3A6969%2Fannounce"
+                    "&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce"
+                    "&tr=udp%3A%2F%2Fopen.demonii.com%3A1337%2Fannounce"
+                    "&tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"
+                )
+
+                for i, m in enumerate(top_movies):
+                    title   = m.get("title", "")
+                    year    = m.get("year", "")
+                    rating  = m.get("rating", 0)
+                    summary = (m.get("summary") or "")[:180]
+                    genres  = ", ".join(m.get("genres") or [])
+                    poster  = m.get("medium_cover_image") or m.get("small_cover_image")
+                    torrents= m.get("torrents") or []
+
+                    # Ordenar torrents: primero por seeds desc, luego por calidad
+                    torrents = sorted(torrents, key=lambda t: int(t.get("seeds", 0)), reverse=True)
+
+                    with st.container(border=True):
+                        c_img, c_info = st.columns([1, 5])
+                        with c_img:
+                            if poster:
+                                st.image(poster, width=80)
+                        with c_info:
+                            medal = {0: "🥇", 1: "🥈", 2: "🥉"}.get(i, f"**#{i+1}**")
+                            st.markdown(
+                                f"{medal} **{title}** ({year}) &nbsp;"
+                                f'<span style="color:#fbbf24;">⭐ {rating}</span>',
+                                unsafe_allow_html=True,
+                            )
+                            if genres:
+                                st.caption(f"🎬 {genres}")
+                            if summary:
+                                st.caption(summary + ("…" if len(m.get("summary","")) > 180 else ""))
+
+                            # Torrents disponibles
+                            if torrents:
+                                t_cols = st.columns(min(len(torrents), 4))
+                                for j, t in enumerate(torrents[:4]):
+                                    q     = t.get("quality", "?")
+                                    ttype = t.get("type", "")
+                                    seeds = int(t.get("seeds", 0))
+                                    size  = t.get("size", "?")
+                                    ih    = (t.get("hash") or "").lower()
+                                    dn    = _uparse_mod.quote(f"{title} ({year}) {q}")
+                                    mag   = f"magnet:?xt=urn:btih:{ih}&dn={dn}&tr={_TR}"
+
+                                    seed_icon = "🟢" if seeds >= 50 else ("🟡" if seeds >= 10 else "🔴")
+                                    q_label   = f"{q} {ttype.upper()}".strip()
+
+                                    with t_cols[j]:
+                                        st.link_button(
+                                            f"🧲 {q_label}",
+                                            mag,
+                                            use_container_width=True,
+                                            help=f"{seed_icon} {seeds} seeds · {size}",
+                                        )
+                            else:
+                                st.caption("Sin torrents disponibles en YTS")
+
+                            # Botón para búsqueda completa (TPB + Knaben)
+                            if st.button("🔍 Más fuentes", key=f"top_dl_more_{i}",
+                                         help="Busca en TPB + Knaben + SolidTorrents"):
+                                with st.spinner(f"Buscando «{title}»…"):
+                                    g_t, b_t = find_movie_torrents_combined(
+                                        title, str(year), n=10,
+                                        title_orig=m.get("title_english") or title,
+                                    )
+                                _render_torrents(g_t, b_t, {"title": title, "year": str(year)},
+                                                 movies_dir, show_blocked=False,
+                                                 key_prefix=f"topdl_{i}")
 
     # ═══════════════════════════════════════════════════════════════════════════
     # TAB 1 — Búsqueda directa
@@ -2245,9 +2855,10 @@ def page_peliculas():
 
                 st.markdown("---")
                 st.markdown("#### Torrents disponibles")
-                with st.spinner("Buscando en The Pirate Bay y YTS..."):
+                with st.spinner("Buscando en TPB · YTS · Knaben · SolidTorrents..."):
                     good_t, blocked_t = find_movie_torrents_combined(
-                        movie["title"], movie["year"], n=n_torrents
+                        movie["title"], movie["year"], n=n_torrents,
+                        title_orig=movie.get("title_orig"),
                     )
                 if good_t:
                     _record_download("Película", len(good_t),
@@ -2380,9 +2991,10 @@ def page_peliculas():
                     key = f"epoch_{i}"
                     if st.button("🔍 Buscar torrents", key=f"btn_{key}",
                                  use_container_width=True):
-                        with st.spinner("Buscando en TPB y YTS..."):
+                        with st.spinner("Buscando en TPB · YTS · Knaben..."):
                             good_t, blocked_t = find_movie_torrents_combined(
-                                movie["title"], movie["year"]
+                                movie["title"], movie["year"],
+                                title_orig=movie.get("title_orig"),
                             )
                         st.session_state[f"good_{key}"] = good_t
                         st.session_state[f"blocked_{key}"] = blocked_t
@@ -2402,10 +3014,12 @@ def page_peliculas():
         # ── Cached call para el top global de culto ───────────────────────────
         @st.cache_data(ttl=3600, show_spinner=False)
         def _tmdb_top_cult_c(key, sort_by, min_votes, limit):
-            # TMDB keyword 9715 = "cult film" | 9816 = "cult classic"
+            # Keywords: 9715=cult film | 9816=cult classic | 10349=B-movie | 212372=midnight movie
             ep = {
-                "with_keywords":  "9715|9816",
-                "vote_count.gte": str(min_votes),
+                "with_keywords":   "9715|9816|10349|212372",
+                "vote_count.gte":  str(min_votes),
+                "popularity.lte":  "60",   # excluye blockbusters; Blade Runner ~15, The Matrix ~180
+                "vote_average.gte": "5.5",  # descarta títulos muy malos sin audiencia real
             }
             return tmdb_discover(key, sort_by=sort_by, limit=limit, extra_params=ep)
 
@@ -2527,7 +3141,8 @@ def page_peliculas():
                         if show_top_t:
                             with st.spinner(f"Buscando «{movie['title']}»..."):
                                 g_t, b_t = find_movie_torrents_combined(
-                                    movie["title"], movie["year"], n=10
+                                    movie["title"], movie["year"], n=10,
+                                    title_orig=movie.get("title_orig"),
                                 )
                             _render_torrents(g_t, b_t, movie, movies_dir,
                                              show_blocked=False,
@@ -2637,7 +3252,8 @@ def page_peliculas():
                             with st.spinner(f"Buscando torrents de «{movie['title']}»..."):
                                 cult_n = st.session_state.get("mov_n", 10)
                                 good_t, blocked_t = find_movie_torrents_combined(
-                                    movie["title"], movie["year"], n=cult_n
+                                    movie["title"], movie["year"], n=cult_n,
+                                    title_orig=movie.get("title_orig"),
                                 )
                             _render_torrents(good_t, blocked_t, movie, movies_dir,
                                              show_blocked=False, key_prefix=f"cult_{i}")
@@ -3082,7 +3698,10 @@ def page_peliculas():
 
                 if st.session_state.get("wl_active") == i:
                     with st.spinner("Buscando torrents..."):
-                        good_t, blocked_t = find_movie_torrents_combined(m["title"], m.get("year",""))
+                        good_t, blocked_t = find_movie_torrents_combined(
+                            m["title"], m.get("year", ""),
+                            title_orig=m.get("title_orig"),
+                        )
                     _render_torrents(good_t, blocked_t, m, movies_dir,
                                      show_blocked=False, key_prefix=f"wl_{i}")
 
@@ -3243,18 +3862,20 @@ def _render_torrents(good_torrents: list, blocked_torrents: list,
         return
 
     # ── Resumen disponibilidad ────────────────────────────────────────────────
-    has_lat  = any(t.get("s_score", 0) == 2  for t in good_torrents)
-    has_esp  = any(t.get("s_score", 0) >= 1  for t in good_torrents)
-    has_hd   = any("1080p" in t.get("q_label","") or "4K" in t.get("q_label","")
-                   for t in good_torrents)
-    has_yts  = any(t.get("source") == "YTS"  for t in good_torrents)
+    has_lat    = any(t.get("s_score", 0) == 2  for t in good_torrents)
+    has_esp    = any(t.get("s_score", 0) >= 1  for t in good_torrents)
+    has_hd     = any("1080p" in t.get("q_label","") or "4K" in t.get("q_label","")
+                     for t in good_torrents)
+    has_yts    = any(t.get("source") == "YTS"    for t in good_torrents)
+    has_knaben = any(t.get("source") == "Knaben" for t in good_torrents)
 
     pills = []
-    if has_lat:  pills.append('<span class="mh-badge mh-badge-green">🇲🇽 Latino disponible</span>')
-    elif has_esp:pills.append('<span class="mh-badge mh-badge-blue">🌎 Español disponible</span>')
-    else:        pills.append('<span class="mh-badge mh-badge-red">⚠️ Sin audio latino</span>')
-    if has_hd:   pills.append('<span class="mh-badge mh-badge-purple">🎥 HD disponible</span>')
-    if has_yts:  pills.append('<span class="mh-badge mh-badge-yellow">🎬 YTS incluido</span>')
+    if has_lat:    pills.append('<span class="mh-badge mh-badge-green">🇲🇽 Latino disponible</span>')
+    elif has_esp:  pills.append('<span class="mh-badge mh-badge-blue">🌎 Español disponible</span>')
+    else:          pills.append('<span class="mh-badge mh-badge-red">⚠️ Sin audio latino</span>')
+    if has_hd:     pills.append('<span class="mh-badge mh-badge-purple">🎥 HD disponible</span>')
+    if has_yts:    pills.append('<span class="mh-badge mh-badge-yellow">🎬 YTS incluido</span>')
+    if has_knaben: pills.append('<span class="mh-badge mh-badge-blue">🔍 Knaben incluido</span>')
     st.markdown(" ".join(pills) + "<br>", unsafe_allow_html=True)
 
     # ── Lista unificada ───────────────────────────────────────────────────────
@@ -3277,17 +3898,19 @@ def _render_torrents(good_torrents: list, blocked_torrents: list,
 
         # ── Badge de idioma / fuente ──────────────────────────────────────────
         if is_dead:
-            lang_badge, border = "⚫ Sin seeds",           "rgba(80,80,80,0.2)"
+            lang_badge, border = "⚫ Sin seeds",              "rgba(80,80,80,0.2)"
         elif source == "YTS":
-            lang_badge, border = "🎬 YTS · Alta calidad", "rgba(251,191,36,0.5)"
+            lang_badge, border = "🎬 YTS · Alta calidad",    "rgba(251,191,36,0.5)"
+        elif source == "Knaben":
+            lang_badge, border = "🔍 Knaben DHT",            "rgba(96,165,250,0.4)"
         elif s == 2:
-            lang_badge, border = "🇲🇽 Latino",            "rgba(52,211,153,0.55)"
+            lang_badge, border = "🇲🇽 Latino",               "rgba(52,211,153,0.55)"
         elif s == 1:
-            lang_badge, border = "🌎 Español",             "rgba(96,165,250,0.5)"
+            lang_badge, border = "🌎 Español",                "rgba(96,165,250,0.5)"
         elif s == -1:
-            lang_badge, border = "🇪🇸 España",             "rgba(180,100,100,0.35)"
+            lang_badge, border = "🇪🇸 España",                "rgba(180,100,100,0.35)"
         else:
-            lang_badge, border = "🔤 Sin info idioma",    "rgba(100,100,130,0.25)"
+            lang_badge, border = "🔤 Sin info idioma",       "rgba(100,100,130,0.25)"
 
         # ── Encabezado de la tarjeta ──────────────────────────────────────────
         best_ribbon = ""
@@ -3636,6 +4259,564 @@ def page_estadisticas():
         top_artists = artist_counter.most_common(20)
         df_art = pd.DataFrame(top_artists, columns=["Artista", "MP3s"])
         st.bar_chart(df_art.set_index("Artista"), color="#a855f7", height=300)
+
+
+def page_roms():
+    _page_header("🎮", "ROMs", "Busca ROMs para Miyoo A30 y otras consolas · TPB · Knaben · Archive.org")
+
+    # ── Plataformas compatibles con Miyoo A30 ─────────────────────────────────
+    PLATFORMS = {
+        "Game Boy Advance (GBA)":     {"query": "gba roms no-intro", "archive": "GBA", "tpb_cat": 404},
+        "Game Boy / GBC":             {"query": "gameboy color roms no-intro", "archive": "GBC", "tpb_cat": 404},
+        "Super Nintendo (SNES)":      {"query": "snes roms no-intro", "archive": "SNES", "tpb_cat": 404},
+        "Nintendo NES / Famicom":     {"query": "nes famicom roms no-intro", "archive": "NES", "tpb_cat": 404},
+        "PlayStation 1 (PS1/PSX)":    {"query": "psx ps1 roms redump", "archive": "PS1", "tpb_cat": 404},
+        "Sega Genesis / Mega Drive":  {"query": "sega genesis mega drive roms no-intro", "archive": "genesis", "tpb_cat": 404},
+        "Sega Game Gear":             {"query": "game gear roms no-intro", "archive": "GameGear", "tpb_cat": 404},
+        "Nintendo 64 (N64)":          {"query": "n64 roms no-intro", "archive": "N64", "tpb_cat": 404},
+        "Neo Geo / MAME Arcade":      {"query": "mame arcade roms", "archive": "MAME", "tpb_cat": 404},
+        "Pokémon (todos los juegos)": {"query": "pokemon rom gba gbc nds complete", "archive": "pokemon", "tpb_cat": 404},
+    }
+
+    # ── Helpers ───────────────────────────────────────────────────────────────
+    def _rom_size(b):
+        try:
+            b = int(b)
+            for u in ("B", "KB", "MB", "GB"):
+                if b < 1024: return f"{b:.0f} {u}"
+                b //= 1024
+            return f"{b:.1f} TB"
+        except: return "?"
+
+    def _rom_magnet(r):
+        ih   = r.get("info_hash", "")
+        name = _uparse_mod.quote(r.get("name", ""))
+        tr   = ("tr=udp%3A%2F%2Ftracker.openbittorrent.com%3A6969%2Fannounce"
+                "&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce"
+                "&tr=udp%3A%2F%2Fopen.demonii.com%3A1337%2Fannounce")
+        return f"magnet:?xt=urn:btih:{ih}&dn={name}&{tr}"
+
+    def _knaben_roms(q, n=15):
+        try:
+            url = "https://knaben.eu/api/v1/search?" + _uparse_mod.urlencode({
+                "search": q, "orderBy": "seeders", "orderType": "desc", "size": n,
+            })
+            req = _ureq_mod.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with _ureq_mod.urlopen(req, timeout=10) as r:
+                data = json.loads(r.read())
+            hits = data.get("hits") or []
+            out = []
+            for h in hits:
+                ih    = (h.get("info_hash") or "").lower()
+                name  = h.get("title") or h.get("name") or ""
+                seeds = int(h.get("seeders") or 0)
+                size_b= int(h.get("bytes") or 0)
+                if not ih or not name: continue
+                out.append({"name": name, "seeders": seeds, "leechers": int(h.get("leechers") or 0),
+                            "size": size_b, "info_hash": ih, "source": "Knaben"})
+            return out[:n]
+        except Exception:
+            return []
+
+    def _archive_search(q, n=8):
+        """Search Internet Archive for ROM sets."""
+        try:
+            url = "https://archive.org/advancedsearch.php?" + _uparse_mod.urlencode({
+                "q": f"{q} mediatype:software",
+                "fl[]": "identifier,title,description,downloads,item_size",
+                "sort[]": "downloads desc",
+                "rows": n, "page": 1, "output": "json",
+            })
+            req = _ureq_mod.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with _ureq_mod.urlopen(req, timeout=12) as r:
+                data = json.loads(r.read())
+            docs = (data.get("response") or {}).get("docs") or []
+            out = []
+            for d in docs:
+                ident = d.get("identifier", "")
+                title = d.get("title", ident)
+                dl    = d.get("downloads", 0)
+                size_b= d.get("item_size", 0)
+                if not ident: continue
+                out.append({
+                    "name": title[:120],
+                    "identifier": ident,
+                    "downloads": dl,
+                    "size": size_b,
+                    "url": f"https://archive.org/details/{ident}",
+                    "source": "Archive.org",
+                })
+            return out[:n]
+        except Exception:
+            return []
+
+    # ── Top juegos por plataforma (curados) ──────────────────────────────────
+    TOP_GAMES = {
+        "Game Boy Advance (GBA)": [
+            "Pokemon FireRed GBA", "Pokemon Emerald GBA", "Pokemon Ruby GBA",
+            "The Legend of Zelda Minish Cap GBA", "Metroid Fusion GBA",
+            "Castlevania Aria of Sorrow GBA", "Golden Sun GBA",
+            "Final Fantasy VI Advance GBA", "Fire Emblem GBA",
+            "Mega Man Zero GBA", "Mother 3 GBA", "Kirby Amazing Mirror GBA",
+            "Sonic Advance GBA", "Mario Kart Super Circuit GBA",
+            "Super Mario World GBA", "Dragon Ball Z GBA",
+        ],
+        "Game Boy / GBC": [
+            "Pokemon Gold GBC", "Pokemon Silver GBC", "Pokemon Crystal GBC",
+            "The Legend of Zelda Oracle of Ages GBC",
+            "The Legend of Zelda Oracle of Seasons GBC",
+            "Metal Gear Solid GBC", "Dragon Warrior Monsters GBC",
+            "Tetris GB", "Kirby Dream Land GB", "Super Mario Land 2 GB",
+            "Donkey Kong Land GB", "Wario Land GB",
+        ],
+        "Super Nintendo (SNES)": [
+            "Chrono Trigger SNES", "Super Metroid SNES",
+            "The Legend of Zelda A Link to the Past SNES",
+            "Final Fantasy VI SNES", "Super Mario World SNES",
+            "Donkey Kong Country SNES", "Street Fighter II SNES",
+            "Mega Man X SNES", "EarthBound SNES", "Contra III SNES",
+            "Castlevania Super Metroid SNES", "Secret of Mana SNES",
+            "Kirby Super Star SNES", "Super Mario RPG SNES",
+            "Star Fox SNES", "Mortal Kombat SNES",
+        ],
+        "Nintendo NES / Famicom": [
+            "Super Mario Bros 3 NES", "Mega Man 2 NES",
+            "The Legend of Zelda NES", "Contra NES",
+            "Castlevania NES", "Metroid NES", "Tecmo Super Bowl NES",
+            "Ninja Gaiden NES", "DuckTales NES", "Batman NES",
+            "Battletoads NES", "Mike Tyson Punch-Out NES",
+            "Final Fantasy NES", "Kirby Adventure NES",
+        ],
+        "PlayStation 1 (PS1/PSX)": [
+            "Final Fantasy VII PS1", "Metal Gear Solid PS1",
+            "Castlevania Symphony of the Night PS1",
+            "Crash Bandicoot PS1", "Spyro the Dragon PS1",
+            "Tekken 3 PS1", "Resident Evil 2 PS1",
+            "Tomb Raider PS1", "Gran Turismo 2 PS1",
+            "Silent Hill PS1", "Vagrant Story PS1",
+            "Chrono Cross PS1", "Final Fantasy IX PS1",
+            "Twisted Metal 2 PS1", "Tony Hawk Pro Skater 2 PS1",
+        ],
+        "Sega Genesis / Mega Drive": [
+            "Sonic the Hedgehog 2 Genesis", "Streets of Rage 2 Genesis",
+            "Mortal Kombat Genesis", "Aladdin Genesis",
+            "The Lion King Genesis", "Contra Hard Corps Genesis",
+            "Gunstar Heroes Genesis", "Phantasy Star IV Genesis",
+            "Earthworm Jim Genesis", "Comix Zone Genesis",
+            "Sonic & Knuckles Genesis", "Road Rash Genesis",
+        ],
+        "Sega Game Gear": [
+            "Sonic the Hedgehog Game Gear", "Mortal Kombat Game Gear",
+            "Columns Game Gear", "Ristar Game Gear",
+            "Castle of Illusion Game Gear", "Shinobi Game Gear",
+        ],
+        "Nintendo 64 (N64)": [
+            "Super Mario 64 N64", "The Legend of Zelda Ocarina of Time N64",
+            "GoldenEye 007 N64", "Mario Kart 64 N64",
+            "Super Smash Bros N64", "Banjo-Kazooie N64",
+            "Donkey Kong 64 N64", "Star Fox 64 N64",
+            "The Legend of Zelda Majoras Mask N64",
+            "Perfect Dark N64", "Paper Mario N64",
+        ],
+        "Neo Geo / MAME Arcade": [
+            "Metal Slug MAME", "Metal Slug 2 MAME", "Metal Slug 3 MAME",
+            "King of Fighters 98 MAME", "Street Fighter III MAME",
+            "Samurai Shodown MAME", "Garou Mark of the Wolves MAME",
+            "Cadillacs and Dinosaurs MAME", "The Simpsons arcade MAME",
+            "X-Men arcade MAME", "Captain Commando MAME",
+        ],
+        "Pokémon (todos los juegos)": [
+            "Pokemon FireRed GBA", "Pokemon Emerald GBA", "Pokemon Crystal GBC",
+            "Pokemon Gold GBC", "Pokemon Silver GBC",
+            "Pokemon Ruby GBA", "Pokemon Sapphire GBA",
+            "Pokemon Yellow GB", "Pokemon Blue GB",
+            "Pokemon Diamond NDS", "Pokemon HeartGold NDS",
+        ],
+    }
+
+    # ── Layout ────────────────────────────────────────────────────────────────
+    tab_top, tab_plat, tab_buscar, tab_info = st.tabs([
+        "🏆 Top juegos", "🕹️ Por plataforma", "🔎 Buscar juego", "ℹ️ Miyoo A30 info"
+    ])
+
+    # ── Tab 0: Top juegos por plataforma ─────────────────────────────────────
+    with tab_top:
+        st.markdown(
+            "Selecciona una plataforma y haz clic en un juego para buscarlo "
+            "directamente en TPB y Knaben."
+        )
+
+        top_plat_sel = st.selectbox(
+            "Plataforma",
+            list(TOP_GAMES.keys()),
+            key="top_plat_sel",
+        )
+
+        top_fuente = st.selectbox(
+            "Fuente",
+            ["Todas 🔍", "Knaben DHT 🔗", "The Pirate Bay 🏴", "Archive.org 📦"],
+            key="top_fuente",
+        )
+
+        st.markdown("---")
+
+        juegos = TOP_GAMES.get(top_plat_sel, [])
+        cols_per_row = 3
+        rows = [juegos[i:i+cols_per_row] for i in range(0, len(juegos), cols_per_row)]
+
+        if "top_selected_game" not in st.session_state:
+            st.session_state.top_selected_game = None
+
+        for row in rows:
+            cols = st.columns(cols_per_row)
+            for col, game in zip(cols, row):
+                with col:
+                    if st.button(game, key=f"top_{game}", use_container_width=True):
+                        st.session_state.top_selected_game = game
+
+        # ── Resultados del juego seleccionado ─────────────────────────────
+        if st.session_state.top_selected_game:
+            q_top = st.session_state.top_selected_game
+            st.markdown(f"---\n#### Resultados para: **{q_top}**")
+
+            usar_tpb_top     = top_fuente in ("Todas 🔍", "The Pirate Bay 🏴")
+            usar_knaben_top  = top_fuente in ("Todas 🔍", "Knaben DHT 🔗")
+            usar_archive_top = top_fuente in ("Todas 🔍", "Archive.org 📦")
+
+            tpb_top, knaben_top, archive_top = [], [], []
+            with st.spinner(f"Buscando «{q_top}»…"):
+                if usar_tpb_top:
+                    raw_top = _tpb_search_cached(q_top, 404, 10)
+                    tpb_top = [{**r, "source": "TPB"} for r in raw_top]
+                if usar_knaben_top:
+                    knaben_top = _knaben_roms(q_top, 10)
+                if usar_archive_top:
+                    archive_top = _archive_search(q_top, 5)
+
+            seen_top, results_top = set(), []
+            for r in knaben_top + tpb_top:
+                ih = r.get("info_hash", "")
+                if ih and ih in seen_top: continue
+                seen_top.add(ih)
+                results_top.append(r)
+            results_top.sort(key=lambda r: int(r.get("seeders", 0)), reverse=True)
+
+            if not results_top and not archive_top:
+                st.warning("Sin resultados. Prueba en otra fuente.")
+
+            for i, r in enumerate(results_top):
+                name  = r.get("name", "")
+                seeds = int(r.get("seeders", 0))
+                size  = _rom_size(r.get("size", 0))
+                mag   = _rom_magnet(r)
+                sc    = "🟢" if seeds >= 10 else ("🟡" if seeds >= 3 else "🔴")
+                src_b = {"TPB": "🏴 TPB", "Knaben": "🔗 Knaben"}.get(r.get("source",""), r.get("source",""))
+                with st.container(border=True):
+                    c1, c2, c3 = st.columns([5, 2, 2])
+                    with c1:
+                        st.markdown(f"**{name[:80]}**")
+                        st.caption(src_b)
+                    with c2:
+                        st.caption(f"{sc} {seeds} seeds · 💾 {size}")
+                    with c3:
+                        st.link_button("🧲 Magnet", mag, use_container_width=True)
+
+            for b in archive_top:
+                sz  = _rom_size(b.get("size", 0))
+                iid = b["identifier"]
+                torrent_url_top = f"https://archive.org/download/{iid}/{iid}_archive.torrent"
+                with st.container(border=True):
+                    c1, c2, c3 = st.columns([4, 1, 1])
+                    with c1:
+                        st.markdown(f"**{b['name'][:90]}**")
+                        st.caption(f"📦 Archive.org · 💾 {sz}")
+                    with c2:
+                        st.link_button("⬇ .torrent", torrent_url_top, use_container_width=True)
+                    with c3:
+                        st.link_button("🌐 Ver", b["url"], use_container_width=True)
+
+    # ── Tab 1: Por plataforma ─────────────────────────────────────────────────
+    with tab_plat:
+        st.markdown(
+            "Selecciona una plataforma para buscar **colecciones completas de ROMs** "
+            "(No-Intro / Redump). Ideal para llenar tu Miyoo A30."
+        )
+
+        col_plat, col_src = st.columns([3, 1])
+        with col_plat:
+            plat_name = st.selectbox(
+                "Plataforma",
+                list(PLATFORMS.keys()),
+                key="rom_plat",
+            )
+        with col_src:
+            rom_fuente = st.selectbox(
+                "Fuente",
+                ["Todas 🔍", "Knaben DHT 🔗", "The Pirate Bay 🏴", "Archive.org 📦"],
+                key="rom_fuente",
+            )
+
+        col_n, col_quality = st.columns(2)
+        with col_n:
+            n_rom = st.slider("Resultados por fuente", 5, 30, 12, key="rom_n")
+        with col_quality:
+            solo_nointro = st.toggle(
+                "Preferir No-Intro / Redump",
+                value=True,
+                key="rom_nointro",
+                help="No-Intro y Redump son las colecciones más limpias y verificadas de ROMs.",
+            )
+
+        buscar_plat = st.button("🔍 Buscar ROMs", type="primary",
+                                use_container_width=True, key="rom_buscar_plat")
+
+        if buscar_plat:
+            plat = PLATFORMS[plat_name]
+            q    = plat["query"]
+            if solo_nointro and "no-intro" not in q and "redump" not in q:
+                q = q + " no-intro"
+
+            tpb_res, knaben_res, archive_res = [], [], []
+
+            usar_tpb     = rom_fuente in ("Todas 🔍", "The Pirate Bay 🏴")
+            usar_knaben  = rom_fuente in ("Todas 🔍", "Knaben DHT 🔗")
+            usar_archive = rom_fuente in ("Todas 🔍", "Archive.org 📦")
+
+            with st.spinner(f"Buscando ROMs de {plat_name}…"):
+                if usar_tpb:
+                    raw = _tpb_search_cached(q, plat["tpb_cat"], n_rom)
+                    tpb_res = [{**r, "source": "TPB"} for r in raw]
+                if usar_knaben:
+                    knaben_res = _knaben_roms(q, n_rom)
+                if usar_archive:
+                    archive_res = _archive_search(plat_name, n_rom)
+
+            # ── Resultados TPB + Knaben ────────────────────────────────────
+            torrent_results = []
+            seen = set()
+            for r in knaben_res + tpb_res:
+                ih = r.get("info_hash", "")
+                if ih and ih in seen: continue
+                seen.add(ih)
+                torrent_results.append(r)
+            torrent_results.sort(key=lambda r: int(r.get("seeders", 0)), reverse=True)
+
+            if torrent_results:
+                st.markdown(f"#### 🧲 Torrents — {len(torrent_results)} resultados")
+                for i, r in enumerate(torrent_results):
+                    name  = r.get("name", "")
+                    seeds = int(r.get("seeders", 0))
+                    size  = _rom_size(r.get("size", 0))
+                    mag   = _rom_magnet(r)
+                    sc    = "🟢" if seeds >= 10 else ("🟡" if seeds >= 3 else "🔴")
+                    src_b = {"TPB": "🏴 TPB", "Knaben": "🔗 Knaben"}.get(r.get("source",""), r.get("source",""))
+                    with st.container(border=True):
+                        c1, c2, c3 = st.columns([5, 2, 2])
+                        with c1:
+                            st.markdown(f"**{name[:80]}**")
+                            st.caption(src_b)
+                        with c2:
+                            st.caption(f"{sc} {seeds} seeds")
+                            st.caption(f"💾 {size}")
+                        with c3:
+                            st.link_button("🧲 Magnet", mag,
+                                           use_container_width=True,
+                                           help="Abrir en qBittorrent / uTorrent")
+
+            # ── Resultados Archive.org ─────────────────────────────────────
+            if archive_res:
+                st.markdown(f"#### 📦 Internet Archive — {len(archive_res)} colecciones")
+                st.caption("Colecciones No-Intro/Redump archivadas. El torrent descarga todos los archivos del pack.")
+                for b in archive_res:
+                    dl  = f"{b['downloads']:,}" if b.get("downloads") else "?"
+                    sz  = _rom_size(b.get("size", 0))
+                    iid = b["identifier"]
+                    torrent_url = f"https://archive.org/download/{iid}/{iid}_archive.torrent"
+                    with st.container(border=True):
+                        c1, c2, c3 = st.columns([4, 1, 1])
+                        with c1:
+                            st.markdown(f"**{b['name'][:90]}**")
+                            st.caption(f"📥 {dl} descargas · 💾 {sz}")
+                        with c2:
+                            st.link_button("⬇ .torrent",
+                                           torrent_url,
+                                           use_container_width=True,
+                                           help="Descarga el archivo .torrent del pack completo")
+                        with c3:
+                            st.link_button("🌐 Ver",
+                                           b["url"],
+                                           use_container_width=True,
+                                           help="Ver los archivos individuales en Archive.org")
+
+            if not torrent_results and not archive_res:
+                st.warning("Sin resultados. Prueba con otra fuente o plataforma.")
+
+    # ── Tab 2: Búsqueda directa de juego ─────────────────────────────────────
+    with tab_buscar:
+        st.markdown(
+            "Busca un **juego específico** por nombre. "
+            "Usa el nombre en inglés para mejores resultados."
+        )
+
+        col_q2, col_src2 = st.columns([3, 1])
+        with col_q2:
+            rom_query = st.text_input(
+                "Nombre del juego",
+                placeholder="ej: Pokemon Fire Red, Zelda, Chrono Trigger...",
+                key="rom_query",
+            )
+        with col_src2:
+            rom_fuente2 = st.selectbox(
+                "Fuente",
+                ["Todas 🔍", "Knaben DHT 🔗", "The Pirate Bay 🏴", "Archive.org 📦"],
+                key="rom_fuente2",
+            )
+
+        col_plat2, col_n2 = st.columns(2)
+        with col_plat2:
+            plat_hint = st.selectbox(
+                "Plataforma (opcional)",
+                ["Cualquiera"] + list(PLATFORMS.keys()),
+                key="rom_plat2",
+                help="Añade la plataforma al query para resultados más precisos.",
+            )
+        with col_n2:
+            n_rom2 = st.slider("Resultados por fuente", 5, 30, 15, key="rom_n2")
+
+        # Sugerencias rápidas
+        SUGERENCIAS_ROM = [
+            "Pokemon Fire Red GBA", "Zelda Link to the Past SNES",
+            "Chrono Trigger SNES", "Final Fantasy VI SNES",
+            "Castlevania Symphony of the Night PS1",
+            "Mega Man X SNES", "Street Fighter II SNES",
+            "Super Mario World SNES", "Donkey Kong Country SNES",
+            "Metal Slug Neo Geo", "Sonic the Hedgehog Genesis",
+        ]
+
+        def _set_rom_query(sug):
+            st.session_state["rom_query"] = sug
+
+        with st.expander("💡 Sugerencias de búsqueda"):
+            sug_cols = st.columns(3)
+            for j, sug in enumerate(SUGERENCIAS_ROM):
+                sug_cols[j % 3].button(
+                    sug, key=f"rom_sug_{j}",
+                    on_click=_set_rom_query, args=(sug,),
+                    use_container_width=True,
+                )
+
+        buscar_juego = st.button("🔍 Buscar juego", type="primary",
+                                 use_container_width=True,
+                                 disabled=not rom_query,
+                                 key="rom_buscar_juego")
+
+        if buscar_juego and rom_query:
+            plat_suffix = ""
+            if plat_hint != "Cualquiera":
+                short = plat_hint.split("(")[0].strip().split("/")[0].strip()
+                plat_suffix = f" {short.split()[-1]}"  # last word: GBA, SNES, PS1...
+            q2 = rom_query + plat_suffix
+
+            usar_tpb2     = rom_fuente2 in ("Todas 🔍", "The Pirate Bay 🏴")
+            usar_knaben2  = rom_fuente2 in ("Todas 🔍", "Knaben DHT 🔗")
+            usar_archive2 = rom_fuente2 in ("Todas 🔍", "Archive.org 📦")
+
+            tpb_res2, knaben_res2, archive_res2 = [], [], []
+            with st.spinner(f"Buscando «{q2}»…"):
+                if usar_tpb2:
+                    raw2 = _tpb_search_cached(q2, 404, n_rom2)
+                    tpb_res2 = [{**r, "source": "TPB"} for r in raw2]
+                if usar_knaben2:
+                    knaben_res2 = _knaben_roms(q2, n_rom2)
+                if usar_archive2:
+                    archive_res2 = _archive_search(q2, 6)
+
+            seen2, resultados2 = set(), []
+            for r in knaben_res2 + tpb_res2:
+                ih = r.get("info_hash", "")
+                if ih and ih in seen2: continue
+                seen2.add(ih)
+                resultados2.append(r)
+            resultados2.sort(key=lambda r: int(r.get("seeders", 0)), reverse=True)
+
+            total2 = len(resultados2) + len(archive_res2)
+            if total2 == 0:
+                st.warning("Sin resultados. Prueba el nombre en inglés o sin la plataforma.")
+            else:
+                st.success(f"✅ {total2} resultados para **{q2}**")
+
+            if resultados2:
+                st.markdown(f"#### 🧲 Torrents — {len(resultados2)} resultados")
+                for i, r in enumerate(resultados2):
+                    name  = r.get("name", "")
+                    seeds = int(r.get("seeders", 0))
+                    size  = _rom_size(r.get("size", 0))
+                    mag   = _rom_magnet(r)
+                    sc    = "🟢" if seeds >= 10 else ("🟡" if seeds >= 3 else "🔴")
+                    src_b = {"TPB": "🏴 TPB", "Knaben": "🔗 Knaben"}.get(r.get("source",""), r.get("source",""))
+                    with st.container(border=True):
+                        c1, c2, c3 = st.columns([5, 2, 2])
+                        with c1:
+                            st.markdown(f"**{name[:80]}**")
+                            st.caption(src_b)
+                        with c2:
+                            st.caption(f"{sc} {seeds} seeds")
+                            st.caption(f"💾 {size}")
+                        with c3:
+                            st.link_button("🧲 Magnet", mag,
+                                           use_container_width=True)
+
+            if archive_res2:
+                st.markdown(f"#### 📦 Archive.org — {len(archive_res2)} resultados")
+                for b in archive_res2:
+                    sz  = _rom_size(b.get("size", 0))
+                    iid = b["identifier"]
+                    torrent_url2 = f"https://archive.org/download/{iid}/{iid}_archive.torrent"
+                    with st.container(border=True):
+                        c1, c2, c3 = st.columns([4, 1, 1])
+                        with c1:
+                            st.markdown(f"**{b['name'][:90]}**")
+                            st.caption(f"💾 {sz}")
+                        with c2:
+                            st.link_button("⬇ .torrent",
+                                           torrent_url2,
+                                           use_container_width=True,
+                                           help="Descarga el .torrent del pack")
+                        with c3:
+                            st.link_button("🌐 Ver",
+                                           b["url"],
+                                           use_container_width=True,
+                                           help="Ver archivos en Archive.org")
+
+    # ── Tab 3: Info Miyoo A30 ─────────────────────────────────────────────────
+    with tab_info:
+        st.markdown("### Miyoo A30 — Sistemas compatibles")
+        st.markdown(
+            "El **Miyoo A30** corre **OnionOS** y soporta la mayoría de los "
+            "sistemas listados abajo. Las colecciones **No-Intro** son las más "
+            "recomendadas: sin duplicados, verificadas por checksum."
+        )
+        st.markdown("---")
+
+        COMPAT = [
+            ("🟢 Perfecto",  ["Game Boy (GB)", "Game Boy Color (GBC)", "Game Boy Advance (GBA)",
+                               "NES / Famicom", "SNES / Super Famicom", "Sega Genesis",
+                               "Sega Master System", "Game Gear", "Neo Geo Pocket"]),
+            ("🟡 Bueno",     ["PlayStation 1 (PS1)", "Neo Geo (FBA)", "MAME Arcade",
+                               "PC-Engine / TurboGrafx", "Atari Lynx", "WonderSwan"]),
+            ("🔴 Limitado",  ["Nintendo 64 (N64)", "Sega CD", "Atari 5200/7800"]),
+        ]
+        for label, systems in COMPAT:
+            st.markdown(f"**{label}**")
+            cols = st.columns(3)
+            for j, s in enumerate(systems):
+                cols[j % 3].markdown(f"- {s}")
+            st.markdown("")
+
+        st.info(
+            "**Tip:** Para PS1 usa colecciones **PBP** (formato comprimido) para ahorrar espacio. "
+            "Para GBA busca siempre **No-Intro GBA** — incluye ~3 200 juegos en ~8 GB."
+        )
 
 
 def page_explorador():
@@ -4308,6 +5489,7 @@ hr {
 .mh-badge-red    { background: rgba(248,113,113,0.14); color: #fca5a5; border: 1px solid rgba(248,113,113,0.28); }
 .mh-badge-blue   { background: rgba(96,165,250,0.14);  color: #93c5fd; border: 1px solid rgba(96,165,250,0.28); }
 .mh-badge-purple { background: rgba(120,80,255,0.14);  color: #c4b5fd; border: 1px solid rgba(120,80,255,0.28); }
+.mh-badge-orange { background: rgba(251,146,60,0.14);  color: #fdba74; border: 1px solid rgba(251,146,60,0.28); }
 
 .mh-stat-row { display: flex; gap: 12px; flex-wrap: wrap; margin: 12px 0; }
 .mh-stat {
@@ -4584,7 +5766,7 @@ NAV_GROUPS = [
     },
     {
         "label": "📥  DESCARGA",
-        "pages": ["🎵 Música", "🎬 Películas", "📚 Ebooks", "🟢 Mi Spotify"],
+        "pages": ["🎵 Música", "🎬 Películas", "📚 Ebooks", "🟢 Mi Spotify", "🎮 ROMs"],
     },
     {
         "label": "🗂  BIBLIOTECA",
@@ -4603,6 +5785,7 @@ PAGE_MAP = {
     "🎬 Películas":          page_peliculas,
     "📚 Ebooks":             page_ebooks,
     "🟢 Mi Spotify":         page_spotify,
+    "🎮 ROMs":               page_roms,
     "🔧 Fix Metadata":       page_metadata,
     "🧹 Limpiar duplicados": page_phone,
     "📊 Explorador":         page_explorador,
@@ -4619,6 +5802,7 @@ PAGE_HINTS = {
     "🎬 Películas":          "TMDB + TPB + YTS · Latino",
     "📚 Ebooks":             "Libros para Kindle",
     "🟢 Mi Spotify":         "Tu historial personal",
+    "🎮 ROMs":               "Miyoo A30 · GBA · SNES · PS1",
     "🔧 Fix Metadata":       "Corrige tags ID3 de MP3s",
     "🧹 Limpiar duplicados": "Elimina MP3s repetidos",
     "📊 Explorador":         "Espacio por carpeta",
