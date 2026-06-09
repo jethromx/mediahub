@@ -1770,7 +1770,7 @@ def page_spotify():
             data_dir.mkdir(exist_ok=True)
             st.success(f"Carpeta creada: {data_dir}")
     else:
-        tab1, tab2 = st.tabs(["▶ Ejecutar", "📂 Resultados"])
+        tab1, tab2, tab3 = st.tabs(["▶ Ejecutar", "📂 Resultados", "🎵 Canciones"])
         with tab1:
             st.markdown("Procesa tu historial y busca tus artistas más escuchados en TPB.")
             if st.button("🚀 Iniciar", type="primary"):
@@ -1786,6 +1786,131 @@ def page_spotify():
             out = BASE_DIR / "output"
             if (out / "reporte.txt").exists():
                 output_files_section(out, extensions=[".txt", ".json"])
+
+        with tab3:
+            canciones_path = BASE_DIR / "output" / "top_canciones.json"
+            if not canciones_path.exists():
+                st.info("Primero ejecuta el análisis en **▶ Ejecutar** para generar el listado de canciones.")
+            else:
+                canciones = json.loads(canciones_path.read_text(encoding="utf-8"))
+                results   = _spotify_load_results()
+
+                # ── Métricas ──────────────────────────────────────────────────
+                n_total     = len(canciones)
+                n_found     = sum(1 for c in canciones
+                                  if results.get(f"{c['artist']} — {c['track']}", {}).get("status") == "found")
+                n_not_found = sum(1 for c in canciones
+                                  if results.get(f"{c['artist']} — {c['track']}", {}).get("status") == "not_found")
+                n_pending   = n_total - n_found - n_not_found
+
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Total canciones", n_total)
+                m2.metric("✅ Encontradas",  n_found)
+                m3.metric("❌ Sin resultado", n_not_found)
+                m4.metric("⏳ Sin buscar",    n_pending)
+
+                st.markdown("---")
+
+                # ── Botones de acción batch ───────────────────────────────────
+                col_b1, col_b2 = st.columns(2)
+                run_all    = col_b1.button("🚀 Buscar todas las pendientes",
+                                           type="primary",
+                                           disabled=(n_pending == 0),
+                                           use_container_width=True)
+                retry_nf   = col_b2.button("🔄 Re-buscar sin resultado",
+                                           disabled=(n_not_found == 0),
+                                           use_container_width=True)
+
+                if run_all or retry_nf:
+                    to_search = [
+                        c for c in canciones
+                        if (run_all and f"{c['artist']} — {c['track']}" not in results)
+                        or (retry_nf and results.get(f"{c['artist']} — {c['track']}", {}).get("status") == "not_found")
+                    ]
+                    prog_bar  = st.progress(0.0)
+                    prog_text = st.empty()
+                    total_s   = len(to_search)
+                    for idx, c in enumerate(to_search):
+                        label = f"{c['artist']} — {c['track']}"
+                        prog_text.text(f"Buscando {idx + 1}/{total_s}: {label}…")
+                        prog_bar.progress((idx + 1) / total_s)
+                        results[label] = _search_song_torrent(c["artist"], c["track"])
+                        if idx % 5 == 0:
+                            _spotify_save_results(results)
+                        time.sleep(1.0)
+                    _spotify_save_results(results)
+                    prog_text.success(f"✅ Listo — {total_s} canciones buscadas.")
+                    st.rerun()
+
+                st.markdown("---")
+
+                # ── Filtro ────────────────────────────────────────────────────
+                filtro = st.radio(
+                    "Filtrar",
+                    ["Todas", "✅ Encontradas", "❌ Sin resultado", "⏳ Sin buscar"],
+                    horizontal=True,
+                    key="spo_filtro",
+                )
+
+                def _filtrar(c):
+                    key    = f"{c['artist']} — {c['track']}"
+                    status = results.get(key, {}).get("status")
+                    if filtro == "✅ Encontradas":   return status == "found"
+                    if filtro == "❌ Sin resultado":  return status == "not_found"
+                    if filtro == "⏳ Sin buscar":     return status is None
+                    return True
+
+                visible = [c for c in canciones if _filtrar(c)]
+                st.caption(f"{len(visible)} canciones")
+
+                # Mostrar máximo 100 filas para no sobrecargar el render
+                MAX_ROWS = 100
+                if len(visible) > MAX_ROWS:
+                    st.info(f"Mostrando las primeras {MAX_ROWS} de {len(visible)}. Usa el filtro para ver el resto.")
+                    visible = visible[:MAX_ROWS]
+
+                # ── Filas de canciones ────────────────────────────────────────
+                for i, c in enumerate(visible):
+                    cache_key = f"{c['artist']} — {c['track']}"
+                    res       = results.get(cache_key, {})
+                    status    = res.get("status")
+                    plays     = c.get("plays", 0)
+
+                    with st.container(border=True):
+                        col_info, col_status, col_action = st.columns([4, 2, 2])
+
+                        with col_info:
+                            st.markdown(f"**{c['artist']}** — {c['track']}")
+                            st.caption(f"🔁 {plays} plays")
+
+                        with col_status:
+                            if status == "found":
+                                name_t = res.get("name", "")[:60]
+                                seeds  = res.get("seeds", 0)
+                                size   = res.get("size", "?")
+                                seed_icon = "🟢" if seeds >= 20 else ("🟡" if seeds >= 5 else "🔴")
+                                st.caption(f"✅ {name_t}")
+                                st.caption(f"{seed_icon} {seeds} seeds · {size}")
+                            elif status == "not_found":
+                                st.caption("❌ Sin resultado")
+                            else:
+                                st.caption("⏳ Sin buscar")
+
+                        with col_action:
+                            if status == "found":
+                                ih  = res.get("info_hash", "")
+                                mag = _build_magnet(ih, res.get("name", ""))
+                                st.link_button("🧲 Abrir", mag,
+                                               use_container_width=True,
+                                               help="Abrir en uTorrent / qBittorrent")
+                            else:
+                                btn_label = "🔄 Reintentar" if status == "not_found" else "🔍 Buscar"
+                                if st.button(btn_label, key=f"spo_search_{i}",
+                                             use_container_width=True):
+                                    with st.spinner(f"Buscando {c['artist']} — {c['track']}…"):
+                                        results[cache_key] = _search_song_torrent(c["artist"], c["track"])
+                                        _spotify_save_results(results)
+                                    st.rerun()
 
 
 def page_phone():
