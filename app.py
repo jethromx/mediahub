@@ -99,6 +99,67 @@ def _save_watchlist(data: list):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Cache de resultados de búsqueda por canción de Spotify
+# ─────────────────────────────────────────────────────────────────────────────
+
+SPOTIFY_RESULTS_FILE = BASE_DIR / "output" / "spotify_torrents_results.json"
+
+
+def _spotify_load_results() -> dict:
+    if SPOTIFY_RESULTS_FILE.exists():
+        try:
+            return json.loads(SPOTIFY_RESULTS_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+
+def _spotify_save_results(data: dict):
+    SPOTIFY_RESULTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    SPOTIFY_RESULTS_FILE.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def _search_song_torrent(artist: str, track: str) -> dict:
+    """Busca el mejor torrent para una canción. Devuelve dict con status found/not_found."""
+    queries = _expand_music_queries(f"{artist} {track}")
+    for q in queries:
+        results = _knaben_search_music(q, 10)
+        best = _best_torrent(results)
+        if best:
+            return {
+                "status": "found",
+                "name": best["name"],
+                "seeds": int(best.get("seeders", 0)),
+                "size": _size_human(best.get("size", 0)),
+                "info_hash": best.get("info_hash", ""),
+                "searched_at": time.strftime("%Y-%m-%d %H:%M"),
+            }
+        tpb_results = _tpb_search_cached(q, 101, 10)
+        tpb_normalized = [
+            {
+                "name": r.get("name", ""),
+                "seeders": int(r.get("seeders", 0)),
+                "size": int(r.get("size", 0)),
+                "info_hash": r.get("info_hash", ""),
+            }
+            for r in tpb_results
+        ]
+        best = _best_torrent(tpb_normalized)
+        if best:
+            return {
+                "status": "found",
+                "name": best["name"],
+                "seeds": int(best.get("seeders", 0)),
+                "size": _size_human(best.get("size", 0)),
+                "info_hash": best.get("info_hash", ""),
+                "searched_at": time.strftime("%Y-%m-%d %H:%M"),
+            }
+    return {"status": "not_found", "searched_at": time.strftime("%Y-%m-%d %H:%M")}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Búsqueda TPB cacheada a nivel módulo  (feature #11)
 # ─────────────────────────────────────────────────────────────────────────────
 
