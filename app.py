@@ -160,7 +160,8 @@ def _knaben_search_music(q: str, n: int = 12) -> list:
             size_b = int(h.get("bytes") or 0)
             if not ih or not name:
                 continue
-            out.append({"name": name, "seeders": seeds, "size": size_b, "info_hash": ih})
+            leechers = int(h.get("leechers") or 0)
+            out.append({"name": name, "seeders": seeds, "leechers": leechers, "size": size_b, "info_hash": ih, "source": "Knaben"})
         return out[:n]
     except Exception:
         return []
@@ -173,10 +174,15 @@ def _expand_music_queries(q: str) -> list:
     if no_acc.lower() != q.lower():
         variants.append(no_acc)
     base = no_acc if no_acc.lower() != q.lower() else q
-    variants.append(base + " discography")
+    q_lower = q.lower()
+    if "discografia" not in q_lower and "discography" not in q_lower:
+        variants.append(base + " discografia")
+        variants.append(base + " discography")
     words = q.strip().split()
     if len(words) >= 2:
-        variants.append(words[0])
+        last = words[-1]
+        variants.append(last + " discografia")
+        variants.append(last)
     return list(dict.fromkeys(v.strip() for v in variants if v.strip()))
 
 
