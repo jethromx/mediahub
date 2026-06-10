@@ -1847,6 +1847,10 @@ def page_spotify():
                         prog_text.text(f"Buscando {idx + 1}/{total_s}: {label}…")
                         prog_bar.progress((idx + 1) / total_s)
                         results[label] = _search_song_torrent(c["artist"], c["track"])
+                        if results[label].get("status") == "found":
+                            ih  = results[label].get("info_hash", "")
+                            mag = _build_magnet(ih, results[label].get("name", ""))
+                            subprocess.Popen(["open", mag])
                         if idx % 5 == 0:
                             _spotify_save_results(results)
                         time.sleep(1.0)
@@ -1920,6 +1924,10 @@ def page_spotify():
                                     with st.spinner(f"Buscando {c['artist']} — {c['track']}…"):
                                         results[cache_key] = _search_song_torrent(c["artist"], c["track"])
                                         _spotify_save_results(results)
+                                        if results[cache_key].get("status") == "found":
+                                            ih  = results[cache_key].get("info_hash", "")
+                                            mag = _build_magnet(ih, results[cache_key].get("name", ""))
+                                            subprocess.Popen(["open", mag])
                                     st.rerun()
 
 
