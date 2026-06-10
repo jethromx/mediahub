@@ -203,6 +203,19 @@ def _build_magnet(info_hash: str, name: str) -> str:
     return f"magnet:?xt=urn:btih:{info_hash}&dn={_uparse_mod.quote(name)}&{tr}"
 
 
+def _magnet_button(label: str, mag_url: str, key: str = "", full_width: bool = True) -> None:
+    """Renders a magnet link as a plain <a> tag so the browser triggers the OS handler directly,
+    avoiding the target=_blank behavior of st.link_button that blocks protocol handlers."""
+    width = "width:100%;display:inline-flex;justify-content:center;" if full_width else ""
+    st.markdown(
+        f'<a href="{mag_url}" '
+        f'style="{width}padding:6px 14px;background:#7c3aed;color:#fff;'
+        f'border-radius:6px;text-decoration:none;font-size:0.84rem;font-weight:500;'
+        f'align-items:center;gap:4px;">{label}</a>',
+        unsafe_allow_html=True,
+    )
+
+
 def _knaben_search_music(q: str, n: int = 12) -> list:
     try:
         url = "https://knaben.eu/api/v1/search?" + _uparse_mod.urlencode({
@@ -531,7 +544,7 @@ def page_inicio():
                     with c1:
                         st.caption(f"{sc} {r.get('name','')[:90]}  ·  {seeds} seeds")
                     with c2:
-                        st.link_button("Abrir", mag, use_container_width=True)
+                        _magnet_button("🧲 Abrir", mag)
 
     # ── Accesos rápidos ───────────────────────────────────────────────────────
     st.markdown('<div class="mh-section-title">Acceso rápido</div>',
@@ -947,8 +960,7 @@ def page_musica():
                                 else:
                                     st.caption("Sin hash")
                             with col_mag:
-                                st.link_button("🧲 Magnet", mag, use_container_width=True,
-                                               help="Abrir en uTorrent / qBittorrent")
+                                _magnet_button("🧲 Magnet", mag)
 
             # CSV export
             import io as _io, csv as _csv
@@ -1900,9 +1912,7 @@ def page_spotify():
                             if status == "found":
                                 ih  = res.get("info_hash", "")
                                 mag = _build_magnet(ih, res.get("name", ""))
-                                st.link_button("🧲 Abrir", mag,
-                                               use_container_width=True,
-                                               help="Abrir en uTorrent / qBittorrent")
+                                _magnet_button("🧲 Abrir", mag)
                             else:
                                 btn_label = "🔄 Reintentar" if status == "not_found" else "🔍 Buscar"
                                 if st.button(btn_label, key=f"spo_search_{i}",
@@ -4711,7 +4721,7 @@ def page_roms():
                     with c2:
                         st.caption(f"{sc} {seeds} seeds · 💾 {size}")
                     with c3:
-                        st.link_button("🧲 Magnet", mag, use_container_width=True)
+                        _magnet_button("🧲 Magnet", mag)
 
             for b in archive_top:
                 sz  = _rom_size(b.get("size", 0))
@@ -4811,9 +4821,7 @@ def page_roms():
                             st.caption(f"{sc} {seeds} seeds")
                             st.caption(f"💾 {size}")
                         with c3:
-                            st.link_button("🧲 Magnet", mag,
-                                           use_container_width=True,
-                                           help="Abrir en qBittorrent / uTorrent")
+                            _magnet_button("🧲 Magnet", mag)
 
             # ── Resultados Archive.org ─────────────────────────────────────
             if archive_res:
@@ -4955,8 +4963,7 @@ def page_roms():
                             st.caption(f"{sc} {seeds} seeds")
                             st.caption(f"💾 {size}")
                         with c3:
-                            st.link_button("🧲 Magnet", mag,
-                                           use_container_width=True)
+                            _magnet_button("🧲 Magnet", mag)
 
             if archive_res2:
                 st.markdown(f"#### 📦 Archive.org — {len(archive_res2)} resultados")
