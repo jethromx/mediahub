@@ -20,11 +20,14 @@ BASE_DIR    = Path(__file__).parent
 CONFIG_FILE = BASE_DIR / "config.json"
 PYTHON      = sys.executable
 
+# Las API keys viven en config.json (gitignored) o en variables de entorno —
+# nunca hardcodeadas aquí: este archivo se commitea.
 DEFAULT_CONFIG = {
-    "lastfm_api_key":    "7049ab07a1bbfce19db16bea7b004b29",
-    "spotify_client_id": "25fedca142ec4de8b5663c330f9d21de",
-    "spotify_secret":    "7a44614137a94523b4c5ab867400fe37",
-    "tmdb_api_key":      "",
+    "lastfm_api_key":    os.environ.get("LASTFM_API_KEY", ""),
+    "spotify_client_id": os.environ.get("SPOTIFY_CLIENT_ID", ""),
+    "spotify_secret":    os.environ.get("SPOTIFY_SECRET", ""),
+    "tmdb_api_key":      os.environ.get("TMDB_API_KEY", ""),
+    "opensubtitles_api_key": os.environ.get("OPENSUBTITLES_API_KEY", ""),
     "music_folder":      str(Path.home() / "Downloads" / "Musica"),
     "ebooks_folder":     str(Path.home() / "Downloads" / "Ebooks"),
     "movies_folder":     str(Path.home() / "Downloads" / "Peliculas"),
@@ -274,8 +277,12 @@ def _best_torrent(results: list):
 # Utilidades UI
 # ─────────────────────────────────────────────────────────────────────────────
 
-def stream_script(cmd, log_placeholder, status_placeholder):
-    """Ejecuta un comando y muestra su salida en tiempo real."""
+def stream_script(cmd, log_placeholder, status_placeholder, extra_env=None):
+    """Ejecuta un comando y muestra su salida en tiempo real.
+
+    extra_env: dict con variables de entorno extra (API keys, parámetros) —
+    así los scripts reciben config sin reescribir su código fuente.
+    """
     log_lines = []
     try:
         proc = subprocess.Popen(
@@ -284,7 +291,7 @@ def stream_script(cmd, log_placeholder, status_placeholder):
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
-            env={**os.environ, "PYTHONUNBUFFERED": "1"},
+            env={**os.environ, "PYTHONUNBUFFERED": "1", **(extra_env or {})},
         )
         for line in iter(proc.stdout.readline, ""):
             log_lines.append(line.rstrip())
@@ -639,24 +646,18 @@ def page_musica():
             save_config(cfg)
 
             script = BASE_DIR / "scripts" / "lastfm_export.py"
-            code   = script.read_text()
-
-            import re
-            code = re.sub(r'LASTFM_API_KEY\s*=\s*"[^"]*"',
-                          f'LASTFM_API_KEY = "{cfg["lastfm_api_key"]}"', code)
-            code = re.sub(r'TOP_TRACKS_TPB\s*=\s*\d+',
-                          f'TOP_TRACKS_TPB = {top_tracks}', code)
-            genres_repr = repr(genres)
-            code = re.sub(r'GENRES\s*=\s*\[.*?\]', f'GENRES = {genres_repr}', code, flags=re.DOTALL)
-            # Patch format category if FLAC
-            if audio_fmt == "FLAC":
-                code = re.sub(r'TPB_MUSIC_CAT\s*=\s*\d+', 'TPB_MUSIC_CAT = 100', code)
-            script.write_text(code)
+            extra_env = {
+                "LASTFM_API_KEY":         cfg["lastfm_api_key"],
+                "MEDIAHUB_TOP_TRACKS":    str(top_tracks),
+                "MEDIAHUB_GENRES":        json.dumps(genres),
+                "MEDIAHUB_TPB_MUSIC_CAT": str(fmt_cat_map[audio_fmt]),
+            }
 
             status = st.empty()
             log    = st.empty()
             status.info("⏳ Ejecutando — puede tardar varios minutos...")
-            ok = stream_script([PYTHON, "-u", str(script)], log, status)
+            ok = stream_script([PYTHON, "-u", str(script)], log, status,
+                               extra_env=extra_env)
             if ok:
                 status.success("✅ ¡Listo!")
                 _record_download("Música", top_tracks,
@@ -1267,14 +1268,11 @@ def page_ebooks():
             cfg["top_books"] = top_books
             save_config(cfg)
             script = BASE_DIR / "scripts" / "ebooks_export.py"
-            import re
-            code = script.read_text()
-            code = re.sub(r'TOP_BOOKS_TPB\s*=\s*\d+', f'TOP_BOOKS_TPB = {top_books}', code)
-            script.write_text(code)
             status = st.empty()
             log    = st.empty()
             status.info("⏳ Ejecutando — puede tardar varios minutos...")
-            ok = stream_script([PYTHON, "-u", str(script)], log, status)
+            ok = stream_script([PYTHON, "-u", str(script)], log, status,
+                               extra_env={"MEDIAHUB_TOP_BOOKS": str(top_books)})
             if ok:
                 status.success("✅ ¡Listo!")
             else:
@@ -1588,7 +1586,8 @@ def page_metadata():
                 status = st.empty()
                 log    = st.empty()
                 status.info("⏳ Analizando MP3s — esto puede tardar bastante...")
-                ok = stream_script(cmd, log, status)
+                ok = stream_script(cmd, log, status,
+                                   extra_env={"LASTFM_API_KEY": cfg["lastfm_api_key"]})
                 if ok:
                     status.success("✅ ¡Análisis completado!")
                     if mode == "Normal":
@@ -1653,7 +1652,8 @@ def page_metadata():
                 status_p = st.empty()
                 log_p    = st.empty()
                 status_p.info("⏳ Analizando — Dry Run en curso...")
-                ok = stream_script(cmd, log_p, status_p)
+                ok = stream_script(cmd, log_p, status_p,
+                                   extra_env={"LASTFM_API_KEY": cfg["lastfm_api_key"]})
                 if ok:
                     status_p.success("✅ Preview listo")
 
@@ -2578,6 +2578,16 @@ def page_config():
         st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
         st.markdown("🔗 [Obtener key](https://www.themoviedb.org/settings/api)")
 
+    col7, col8 = st.columns([3, 2])
+    with col7:
+        opensubs_key = st.text_input("OpenSubtitles API Key (subtítulos)",
+                                     value=cfg.get("opensubtitles_api_key", ""),
+                                     type="password",
+                                     help="Opcional — habilita la búsqueda de subtítulos en la API de OpenSubtitles. Sin key, solo se muestran los enlaces a fuentes alternativas.")
+    with col8:
+        st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+        st.markdown("🔗 [Obtener key](https://www.opensubtitles.com/es/consumers)")
+
     st.markdown("### 📁 Carpetas")
     music_folder  = st.text_input("Carpeta de música (MP3s)", value=cfg["music_folder"])
     ebooks_folder = st.text_input("Carpeta de ebooks", value=cfg["ebooks_folder"])
@@ -2611,6 +2621,7 @@ def page_config():
             **cfg,
             "lastfm_api_key": lastfm_key,
             "tmdb_api_key":   tmdb_key,
+            "opensubtitles_api_key": opensubs_key,
             "music_folder":   music_folder,
             "ebooks_folder":  ebooks_folder,
             "movies_folder":  movies_folder,
@@ -2622,16 +2633,6 @@ def page_config():
             "genres":         genres,
         }
         save_config(new_cfg)
-
-        # Actualiza los scripts con la nueva key
-        for script_name, key_const in [("lastfm_export.py", "LASTFM_API_KEY"), ("fix_metadata.py", "LASTFM_API_KEY")]:
-            script = BASE_DIR / "scripts" / script_name
-            if script.exists():
-                import re
-                code = script.read_text()
-                code = re.sub(rf'{key_const}\s*=\s*"[^"]*"', f'{key_const} = "{lastfm_key}"', code)
-                script.write_text(code)
-
         st.success("✅ Configuración guardada")
 
 
@@ -3967,29 +3968,34 @@ def page_peliculas():
             q_enc    = _uparse_mod.quote(sub_query)
             q_subdivx = _uparse_mod.quote(sub_query.replace(" ", "+"))
 
-            # OpenSubtitles REST search (no auth needed for search listing)
+            # OpenSubtitles REST search — requiere API key (⚙️ Configuración)
             subs_found = []
-            try:
-                os_url = (f"https://api.opensubtitles.com/api/v1/subtitles"
-                          f"?query={q_enc}&languages=es&order_by=download_count&order_direction=desc")
-                os_req = _ureq_mod.Request(
-                    os_url,
-                    headers={"User-Agent": "MediaHub/1.0", "Api-Key": "srtku29p8WLGvFqnMb6Xd3YEoHeTcRZ4"},
-                )
-                with _ureq_mod.urlopen(os_req, timeout=8) as r:
-                    os_data = json.loads(r.read().decode())
-                for sub in os_data.get("data", [])[:15]:
-                    attr = sub.get("attributes", {})
-                    subs_found.append({
-                        "title":    attr.get("feature_details", {}).get("movie_name", sub_query),
-                        "year":     attr.get("feature_details", {}).get("year", ""),
-                        "language": attr.get("language", "es"),
-                        "release":  attr.get("release", ""),
-                        "downloads": attr.get("download_count", 0),
-                        "url":      f"https://www.opensubtitles.com/es/subtitles/{sub.get('id','')}"
-                    })
-            except Exception:
-                pass
+            os_api_key = cfg.get("opensubtitles_api_key", "").strip()
+            if os_api_key:
+                try:
+                    os_url = (f"https://api.opensubtitles.com/api/v1/subtitles"
+                              f"?query={q_enc}&languages=es&order_by=download_count&order_direction=desc")
+                    os_req = _ureq_mod.Request(
+                        os_url,
+                        headers={"User-Agent": "MediaHub/1.0", "Api-Key": os_api_key},
+                    )
+                    with _ureq_mod.urlopen(os_req, timeout=8) as r:
+                        os_data = json.loads(r.read().decode())
+                    for sub in os_data.get("data", [])[:15]:
+                        attr = sub.get("attributes", {})
+                        subs_found.append({
+                            "title":    attr.get("feature_details", {}).get("movie_name", sub_query),
+                            "year":     attr.get("feature_details", {}).get("year", ""),
+                            "language": attr.get("language", "es"),
+                            "release":  attr.get("release", ""),
+                            "downloads": attr.get("download_count", 0),
+                            "url":      f"https://www.opensubtitles.com/es/subtitles/{sub.get('id','')}"
+                        })
+                except Exception:
+                    pass
+            else:
+                st.caption("💡 Configura una API key de OpenSubtitles en ⚙️ Configuración "
+                           "para buscar directamente aquí. Mientras tanto usa las fuentes alternativas.")
 
             if subs_found:
                 st.success(f"✅ {len(subs_found)} subtítulos encontrados en OpenSubtitles")

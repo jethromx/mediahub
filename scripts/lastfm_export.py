@@ -14,6 +14,7 @@ Uso:
 """
 
 import json
+import os
 import re
 import time
 import sys
@@ -24,9 +25,9 @@ from datetime import datetime
 from collections import defaultdict
 
 # ── Credencial Last.fm ─────────────────────────────────────────────────────────
+# Llega por variable de entorno (la app la inyecta desde config.json).
 # Regístrate gratis en: https://www.last.fm/api/account/create
-# Solo necesitas el API Key (no el secret para lectura)
-LASTFM_API_KEY = "7049ab07a1bbfce19db16bea7b004b29"
+LASTFM_API_KEY = os.environ.get("LASTFM_API_KEY", "")
 
 LASTFM_API = "https://ws.audioscrobbler.com/2.0/"
 
@@ -36,11 +37,15 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 TPB_API = "https://apibay.org/q.php"
 TPB_WEB = "https://thepiratebay.org/search.php"
 
-# Géneros a consultar
-GENRES = ['rock', 'pop', 'electronic', 'hip-hop', 'jazz', 'metal', 'classical', 'reggae', 'latin', 'blues', 'soul', 'punk', 'indie', 'alternative', 'r&b']
+# Géneros a consultar (MEDIAHUB_GENRES: lista JSON inyectada por la app)
+_DEFAULT_GENRES = ['rock', 'pop', 'electronic', 'hip-hop', 'jazz', 'metal', 'classical', 'reggae', 'latin', 'blues', 'soul', 'punk', 'indie', 'alternative', 'r&b']
+GENRES = json.loads(os.environ["MEDIAHUB_GENRES"]) if os.environ.get("MEDIAHUB_GENRES") else _DEFAULT_GENRES
 
 # Cuántas canciones top buscar en TPB
-TOP_TRACKS_TPB = 200
+TOP_TRACKS_TPB = int(os.environ.get("MEDIAHUB_TOP_TRACKS", "100"))
+
+# Categoría TPB para música: 101=MP3, 100=todo audio
+TPB_MUSIC_CAT = int(os.environ.get("MEDIAHUB_TPB_MUSIC_CAT", "101"))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -285,8 +290,8 @@ def _build_html(rows, not_found):
 def run():
     print("\n🎵  Last.fm Charts → Torrent\n" + "=" * 40)
 
-    if LASTFM_API_KEY == "TU_API_KEY_AQUI":
-        print("\n[!] Configura LASTFM_API_KEY en el script.")
+    if not LASTFM_API_KEY:
+        print("\n[!] Falta LASTFM_API_KEY (variable de entorno o ⚙️ Configuración).")
         print("    Regístrate gratis en: https://www.last.fm/api/account/create\n")
         sys.exit(1)
 
@@ -477,7 +482,7 @@ def run():
 
         album = t.get("album", "")
 
-        results       = tpb_search(query, category=101, max_results=2)
+        results       = tpb_search(query, category=TPB_MUSIC_CAT, max_results=2)
         fallback_used = None
 
         if not results:
@@ -492,7 +497,7 @@ def run():
                 time.sleep(0.5)
             if album:
                 album_query = f"{artist} {album} mp3"
-                results = tpb_search(album_query, category=101, max_results=2)
+                results = tpb_search(album_query, category=TPB_MUSIC_CAT, max_results=2)
                 if not results:
                     results = tpb_search(album_query, category=0, max_results=2)
                 if results:
@@ -500,7 +505,7 @@ def run():
 
         if not results:
             artist_query = f"{artist} mp3"
-            results = tpb_search(artist_query, category=101, max_results=2)
+            results = tpb_search(artist_query, category=TPB_MUSIC_CAT, max_results=2)
             if results:
                 fallback_used = f"artista: {artist}"
 

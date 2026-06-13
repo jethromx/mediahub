@@ -50,7 +50,9 @@ except ImportError:
     sys.exit("Falta requests. Instálalo con: pip install requests")
 
 # ── Credenciales ───────────────────────────────────────────────────────────────
-LASTFM_API_KEY = "7049ab07a1bbfce19db16bea7b004b29"
+# Llega por variable de entorno (la app la inyecta desde config.json).
+# Sin key, las portadas via Last.fm simplemente se omiten (hay try/except).
+LASTFM_API_KEY = os.environ.get("LASTFM_API_KEY", "")
 
 MB_BASE    = "https://musicbrainz.org/ws/2"
 CAA_BASE   = "https://coverartarchive.org"

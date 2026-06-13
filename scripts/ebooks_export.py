@@ -15,6 +15,7 @@ Uso:
 """
 
 import json
+import os
 import time
 import sys
 import re
@@ -31,8 +32,8 @@ TORRENTS_DIR.mkdir(exist_ok=True)
 TPB_API = "https://apibay.org/q.php"
 TPB_WEB = "https://thepiratebay.org/search.php"
 
-# Cuántos libros buscar en TPB
-TOP_BOOKS_TPB = 120
+# Cuántos libros buscar en TPB (la app lo inyecta por variable de entorno)
+TOP_BOOKS_TPB = int(os.environ.get("MEDIAHUB_TOP_BOOKS", "120"))
 
 # Formatos Kindle a buscar (en orden de preferencia)
 KINDLE_FORMATS = ["epub", "mobi", "azw3", "kindle"]
