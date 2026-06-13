@@ -850,10 +850,6 @@ def page_musica():
                            use_container_width=True, disabled=not query)
 
         if buscar and query:
-            TORRENT_SOURCES = [
-                "https://itorrents.org/torrent/{ih}.torrent",
-                "https://torcache.net/torrent/{ih}.torrent",
-            ]
             effective_query = f"{query} {fmt_suffix}" if fmt_suffix != "Auto" else query
 
             usar_tpb       = fuente_mus in ("Todas 🔍", "The Pirate Bay 🏴")
@@ -886,7 +882,17 @@ def page_musica():
                 seen.add(ih)
                 resultados.append(r)
             resultados.sort(key=lambda r: int(r.get("seeders", 0)), reverse=True)
+            st.session_state["mus_results"] = resultados
+            st.session_state["mus_results_query"] = effective_query
 
+        # Render desde session_state: el clic en ⬇ Guardar dispara un rerun en
+        # el que `buscar` vuelve a False, y sin esto el bloque desaparecía
+        resultados = st.session_state.get("mus_results")
+        if resultados is not None:
+            TORRENT_SOURCES = [
+                "https://itorrents.org/torrent/{ih}.torrent",
+                "https://torcache.net/torrent/{ih}.torrent",
+            ]
             if not resultados:
                 st.warning("Sin resultados. Prueba con otro artista, amplía la fuente, o usa una sugerencia de arriba.")
             else:
@@ -971,9 +977,10 @@ def page_musica():
                 writer.writerow([r.get("name","")[:80], r.get("source",""),
                                  r.get("seeders",0), r.get("leechers",0),
                                  _size_human_music(r.get("size",0)), r.get("info_hash","")])
+            q_csv = st.session_state.get("mus_results_query", "busqueda")
             st.download_button(
                 "Exportar resultados a CSV", csv_buf.getvalue().encode(),
-                file_name=f"musica_{query[:30].replace(' ','_')}.csv",
+                file_name=f"musica_{q_csv[:30].replace(' ','_')}.csv",
                 mime="text/csv", use_container_width=True, key="mus_csv_export",
             )
 
@@ -1327,9 +1334,6 @@ def page_ebooks():
                               use_container_width=True, disabled=not query_eb)
 
         if buscar_eb and query_eb:
-            torrents_dir_eb = BASE_DIR / "output_ebooks" / "torrents"
-            torrents_dir_eb.mkdir(parents=True, exist_ok=True)
-
             usar_libgen = fuente_eb in ("Library Genesis 📚", "Ambas fuentes 🔍")
             usar_tpb    = fuente_eb in ("The Pirate Bay 🏴", "Ambas fuentes 🔍")
 
@@ -1349,12 +1353,25 @@ def page_ebooks():
                 if usar_tpb:
                     res_tpb = _eb_search(tpb_query, cat_map_eb[cat_eb], n_eb)
 
+            st.session_state["eb_results"] = {
+                "libgen": res_libgen, "tpb": res_tpb,
+                "query": query_eb, "solo_es": solo_es,
+            }
+
+        # Render desde session_state: el clic en ⬇ Guardar dispara un rerun en
+        # el que `buscar_eb` vuelve a False, y sin esto el clic se perdía
+        eb_state = st.session_state.get("eb_results")
+        if eb_state is not None:
+            torrents_dir_eb = BASE_DIR / "output_ebooks" / "torrents"
+            torrents_dir_eb.mkdir(parents=True, exist_ok=True)
+            res_libgen, res_tpb = eb_state["libgen"], eb_state["tpb"]
+
             total = len(res_libgen) + len(res_tpb)
             if total == 0:
                 st.warning("Sin resultados. Prueba con otro título, amplía la fuente o desactiva el filtro de español.")
             else:
-                st.success(f"✅ {total} resultados para **{query_eb}**"
-                           + (" (en español)" if solo_es else ""))
+                st.success(f"✅ {total} resultados para **{eb_state['query']}**"
+                           + (" (en español)" if eb_state["solo_es"] else ""))
 
             # ── Resultados Library Genesis ─────────────────────────────────
             if res_libgen:
@@ -3040,7 +3057,14 @@ def page_peliculas():
             with st.spinner(f"Buscando «{query}» en TMDB..."):
                 yr = year_hint if year_hint > 0 else None
                 movies = _tmdb_search_c(tmdb_key, query, year=yr)  # feature #11
+            st.session_state["mov_buscar_results"] = movies
+            st.session_state.pop("mov_buscar_torrents", None)
+            st.session_state.pop("mov_sel", None)   # evita selección obsoleta de otra búsqueda
 
+        # Render desde session_state: cambiar de película en el selectbox o
+        # pulsar cualquier botón dispara un rerun en el que `buscar` vuelve a False
+        movies = st.session_state.get("mov_buscar_results")
+        if movies is not None:
             if not movies:
                 st.warning("Sin resultados en TMDB. Prueba con el título en inglés.")
             else:
@@ -3065,14 +3089,21 @@ def page_peliculas():
 
                 st.markdown("---")
                 st.markdown("#### Torrents disponibles")
-                with st.spinner("Buscando en TPB · YTS · Knaben · SolidTorrents..."):
-                    good_t, blocked_t = find_movie_torrents_combined(
-                        movie["title"], movie["year"], n=n_torrents,
-                        title_orig=movie.get("title_orig"),
-                    )
-                if good_t:
-                    _record_download("Película", len(good_t),
-                                     f"{movie['title']} ({movie['year']})")
+                # Caché por película: sin esto cada rerun (guardar magnet,
+                # watchlist) repetiría la búsqueda multi-fuente completa
+                t_cache = st.session_state.get("mov_buscar_torrents")
+                if not t_cache or t_cache[0] != movie.get("id"):
+                    with st.spinner("Buscando en TPB · YTS · Knaben · SolidTorrents..."):
+                        good_t, blocked_t = find_movie_torrents_combined(
+                            movie["title"], movie["year"], n=n_torrents,
+                            title_orig=movie.get("title_orig"),
+                        )
+                    if good_t:
+                        _record_download("Película", len(good_t),
+                                         f"{movie['title']} ({movie['year']})")
+                    st.session_state["mov_buscar_torrents"] = (movie.get("id"), good_t, blocked_t)
+                else:
+                    good_t, blocked_t = t_cache[1], t_cache[2]
 
                 _render_torrents(good_t, blocked_t, movie, movies_dir, show_blocked,
                                  key_prefix="buscar")
@@ -4045,9 +4076,9 @@ def _render_torrents(good_torrents: list, blocked_torrents: list,
     mag_path = movies_dir / "magnets_movies.txt"
 
     if not good_torrents and not blocked_torrents:
-        title_q = urllib.parse.quote_plus(movie.get("title", ""))
+        title_q = _uparse_mod.quote_plus(movie.get("title", ""))
         year_q  = str(movie.get("year", ""))
-        q_full  = urllib.parse.quote_plus(f"{movie.get('title','')} {year_q}".strip())
+        q_full  = _uparse_mod.quote_plus(f"{movie.get('title','')} {year_q}".strip())
         st.warning("Sin torrents encontrados. Prueba buscarlo manualmente en estas fuentes:")
         st.markdown(
             f'<div style="display:flex;flex-wrap:wrap;gap:10px;margin-top:8px;">'
@@ -4273,9 +4304,9 @@ def _render_torrents(good_torrents: list, blocked_torrents: list,
 
     # ── Fallback links cuando hay muy pocos resultados ───────────────────────
     if len(good_torrents) < 3:
-        title_q = urllib.parse.quote_plus(movie.get("title", ""))
+        title_q = _uparse_mod.quote_plus(movie.get("title", ""))
         year_q  = str(movie.get("year", ""))
-        q_full  = urllib.parse.quote_plus(f"{movie.get('title','')} {year_q}".strip())
+        q_full  = _uparse_mod.quote_plus(f"{movie.get('title','')} {year_q}".strip())
         with st.expander("🔎 ¿Pocos resultados? Buscar en más fuentes"):
             st.caption("Estas fuentes externas pueden tener más opciones para esta película:")
             st.markdown(
