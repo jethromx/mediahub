@@ -288,7 +288,8 @@ def classify_torrent(r: dict) -> dict:
 # YTS API  (yts.mx — sin API key, solo películas, muy buena calidad)
 # ─────────────────────────────────────────────────────────────────────────────
 
-YTS_BASE = "https://yts.mx/api/v2"
+YTS_BASE   = "https://yts.mx/api/v2"
+SOLID_BASE = "https://solidtorrents.to/api/v1"
 
 def yts_search(title: str, year: str = None) -> list[dict]:
     """
@@ -402,19 +403,110 @@ def composite_score(t: dict) -> tuple:
     return (seed_bucket, s, q + yts_b, seed_fine)
 
 
+def knaben_search(title: str, year: str = None) -> list[dict]:
+    """
+    Busca en Knaben (índice DHT). Buena cobertura para películas clásicas y raras.
+    API pública, falla silenciosamente.
+    """
+    try:
+        query = f"{title} {year}".strip() if year else title
+        params = {
+            "search": query,
+            "categories": "video",
+            "orderBy": "seeders",
+            "orderType": "desc",
+            "size": 20,
+        }
+        url  = "https://knaben.eu/api/v1/search?" + urllib.parse.urlencode(params)
+        data = http_get(url, timeout=10)
+        if not data:
+            return []
+        hits = data.get("hits") or []
+        results = []
+        for h in hits:
+            ih    = (h.get("info_hash") or h.get("id") or "").lower()
+            name  = h.get("title") or h.get("name") or ""
+            seeds = int(h.get("seeders") or 0)
+            peers = int(h.get("leechers") or 0)
+            size_b = int(h.get("bytes") or h.get("size") or 0)
+            if not ih or not name:
+                continue
+            t = classify_torrent({
+                "name": name, "info_hash": ih,
+                "seeders": seeds, "leechers": peers, "size": size_b,
+            })
+            t["source"] = "Knaben"
+            results.append(t)
+        return [t for t in results if not t.get("blocked")]
+    except Exception as e:
+        print(f"  [!] Knaben error: {e}")
+        return []
+
+
+def solidtorrents_search(title: str, year: str = None) -> list[dict]:
+    """
+    Busca en SolidTorrents (DHT index). Fuente extra para películas raras.
+    Falla silenciosamente si la API no está disponible.
+    """
+    try:
+        query = f"{title} {year}".strip() if year else title
+        params = {"q": query, "sort": "seeders", "category": "video", "size": 15}
+        url  = f"{SOLID_BASE}/search?" + urllib.parse.urlencode(params)
+        data = http_get(url, timeout=8)
+        if not data:
+            return []
+
+        # Dos formatos posibles de respuesta
+        hits = (data.get("hits") or {}).get("hits") or data.get("results") or []
+        results = []
+        for h in hits:
+            src = h.get("_source") or h
+            ih    = src.get("infohash") or src.get("info_hash") or ""
+            name  = src.get("title") or src.get("name") or ""
+            size_b = int(src.get("size") or 0)
+            swarm  = src.get("swarm") or {}
+            seeds  = int(swarm.get("seeders") or src.get("seeders") or 0)
+            peers  = int(swarm.get("leechers") or src.get("leechers") or 0)
+
+            if not ih or not name:
+                continue
+
+            t = classify_torrent({
+                "name": name, "info_hash": ih.lower(),
+                "seeders": seeds, "leechers": peers,
+                "size": size_b,
+            })
+            t["source"] = "Solid"
+            results.append(t)
+
+        return [t for t in results if not t.get("blocked")]
+    except Exception:
+        return []
+
+
 def find_movie_torrents_combined(title: str, year: str,
-                                 n: int = 15) -> tuple[list[dict], list[dict]]:
+                                 n: int = 15,
+                                 title_orig: str = None) -> tuple[list[dict], list[dict]]:
     """
-    Busca en TPB + YTS, combina, ordena por score compuesto y devuelve:
-      (good_sorted, blocked)
-
-    good_sorted: lista única con el mejor resultado primero.
-    El campo "rank" (0-based) y "best" (True en el #1) se agregan a cada item.
+    Busca en TPB + YTS + SolidTorrents + Knaben, combina y ordena por score compuesto.
+    title_orig: título original en inglés para fallback (ej: "The Fly" para "La mosca").
+    Devuelve (good_sorted, blocked).
     """
-    tpb_all = find_movie_torrents(title, year, n=n, prefer_spanish=True)
-    yts_all = yts_search(title, year)
+    orig = title_orig if title_orig and title_orig.lower() != title.lower() else None
 
-    good    = [t for t in tpb_all if not t.get("blocked")] + yts_all
+    tpb_all    = find_movie_torrents(title, year, n=n, prefer_spanish=True, title_orig=orig)
+    yts_all    = yts_search(title, year)
+    solid_all  = solidtorrents_search(title, year)
+    knaben_all = knaben_search(title, year)
+
+    # Buscar también con título original en YTS y Knaben (covers más resultados)
+    if orig:
+        yts_orig    = yts_search(orig, year)
+        knaben_orig = knaben_search(orig, year)
+        yts_all    = yts_all    + yts_orig
+        knaben_all = knaben_all + knaben_orig
+
+    good    = [t for t in tpb_all if not t.get("blocked")] + yts_all + solid_all + knaben_all
     blocked = [t for t in tpb_all if t.get("blocked")]
 
     # Deduplicar por info_hash
@@ -448,14 +540,17 @@ def find_movie_torrents_combined(title: str, year: str,
 # TMDB
 # ─────────────────────────────────────────────────────────────────────────────
 
-def tmdb_discover(api_key: str, year_gte: int, year_lte: int,
+def tmdb_discover(api_key: str, year_gte: int = None, year_lte: int = None,
                   genre_id: int = None, limit: int = 20,
-                  sort_by: str = "popularity.desc") -> list[dict]:
+                  sort_by: str = "popularity.desc",
+                  extra_params: dict = None) -> list[dict]:
     """
     Descubre películas en un rango de años.
     Pagina automáticamente para alcanzar `limit` (máx 200).
     sort_by: 'popularity.desc' | 'primary_release_date.desc' |
              'primary_release_date.asc' | 'vote_average.desc'
+    extra_params: parámetros adicionales para TMDB discover (ej. with_original_language,
+                  vote_average.gte, with_keywords, with_genres como string "80,18")
     """
     results   = []
     page      = 1
@@ -463,16 +558,20 @@ def tmdb_discover(api_key: str, year_gte: int, year_lte: int,
 
     while len(results) < limit and page <= max_pages:
         params = {
-            "api_key":                    api_key,
-            "language":                   "es-MX",
-            "sort_by":                    sort_by,
-            "primary_release_date.gte":   f"{year_gte}-01-01",
-            "primary_release_date.lte":   f"{year_lte}-12-31",
-            "vote_count.gte":             50,
-            "page":                       page,
+            "api_key":        api_key,
+            "language":       "es-MX",
+            "sort_by":        sort_by,
+            "vote_count.gte": 50,
+            "page":           page,
         }
+        if year_gte:
+            params["primary_release_date.gte"] = f"{year_gte}-01-01"
+        if year_lte:
+            params["primary_release_date.lte"] = f"{year_lte}-12-31"
         if genre_id:
             params["with_genres"] = genre_id
+        if extra_params:
+            params.update(extra_params)
 
         url  = f"{TMDB_BASE}/discover/movie?" + urllib.parse.urlencode(params)
         data = http_get(url)
@@ -567,12 +666,15 @@ def tpb_search(query: str, cat: int = 200, n: int = 15) -> list[dict]:
 
 
 def find_movie_torrents(title: str, year: str, n: int = 12,
-                        prefer_spanish: bool = True) -> list[dict]:
+                        prefer_spanish: bool = True,
+                        title_orig: str = None) -> list[dict]:
     """
     Busca torrents para una película con varios fallbacks.
     Devuelve lista ordenada: (español-latino > español > otro) x (calidad > seeds)
+    title_orig: título original en inglés (fallback cuando el título en español no da resultados)
     """
     year_str = str(year) if year else ""
+    orig = title_orig if title_orig and title_orig.lower() != title.lower() else None
     queries = []
 
     if prefer_spanish:
@@ -590,10 +692,23 @@ def find_movie_torrents(title: str, year: str, n: int = 12,
             f"{title} {year_str}",
             title,
         ]
+        # Fallback con título original (ej: "The Fly" cuando buscamos "La mosca")
+        if orig:
+            if year_str:
+                queries += [
+                    f"{orig} {year_str} latino 1080p",
+                    f"{orig} {year_str} español latino",
+                    f"{orig} {year_str} 1080p",
+                ]
+            queries += [f"{orig} {year_str}", orig]
     else:
         if year_str:
             queries += [f"{title} {year_str} 1080p", f"{title} {year_str}"]
         queries.append(title)
+        if orig:
+            if year_str:
+                queries += [f"{orig} {year_str} 1080p", f"{orig} {year_str}"]
+            queries.append(orig)
 
     seen_hashes = set()
     raw_results = []
