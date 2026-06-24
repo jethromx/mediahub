@@ -126,6 +126,127 @@ def tpb_search(query, category=100, max_results=5):
         return []
 
 
+def knaben_search(query, max_results=5):
+    """Busca en la API v1 de Knaben (POST, api.knaben.org). Pide por relevancia
+    con filtro de categoría audio (1000000) y ordena por seeders en cliente —
+    el host .eu y el parámetro order_by ignoran el query."""
+    try:
+        body = json.dumps({
+            "query": query,
+            "categories": [1000000],   # 1000000 = Audio
+            "hide_unsafe": True,
+            "size": max(max_results, 20),
+        }).encode()
+        req = urllib.request.Request(
+            "https://api.knaben.org/v1",
+            data=body,
+            headers={"User-Agent": "Mozilla/5.0", "Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read())
+        out = []
+        for h in (data.get("hits") or []):
+            ih   = (h.get("hash") or "").lower()
+            name = h.get("title") or ""
+            if not ih or not name:
+                continue
+            out.append({
+                "info_hash": ih, "name": name,
+                "seeders": int(h.get("seeders") or 0),
+                "size": int(h.get("bytes") or 0),
+            })
+        out.sort(key=lambda x: x["seeders"], reverse=True)
+        return out[:max_results]
+    except Exception as e:
+        print(f"    [!] Knaben error '{query}': {e}")
+        return []
+
+
+SHAZAM_CACHE_FILE = OUTPUT_DIR / "shazam_cache.json"
+
+
+def shazam_lookup(artist, track):
+    """Devuelve {album, genre, year, ...} desde Shazam (catálogo Apple Music,
+    sin API key), o {} si falla. Cacheado a disco (compartido con la app)."""
+    cache = {}
+    if SHAZAM_CACHE_FILE.exists():
+        try:
+            cache = json.loads(SHAZAM_CACHE_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            cache = {}
+    key = f"{artist} — {track}"
+    if key in cache:
+        return cache[key]
+    out = {}
+    try:
+        url = "https://www.shazam.com/services/amapi/v1/catalog/US/search?" + \
+            urllib.parse.urlencode({"term": f"{artist} {track}", "limit": 3, "types": "songs"})
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0",
+                                                   "Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read())
+        songs = (data.get("results", {}).get("songs", {}).get("data", []))
+        if songs:
+            a = songs[0].get("attributes", {})
+            out = {
+                "album":  a.get("albumName", ""),
+                "genre":  (a.get("genreNames") or [""])[0],
+                "year":   (a.get("releaseDate") or "")[:4],
+                "artist": a.get("artistName", ""),
+                "track":  a.get("name", ""),
+            }
+    except Exception:
+        out = {}
+    cache[key] = out
+    try:
+        SHAZAM_CACHE_FILE.write_text(json.dumps(cache, ensure_ascii=False, indent=2),
+                                     encoding="utf-8")
+    except Exception:
+        pass
+    return out
+
+
+def expand_artist_queries(artist, album=""):
+    """Variantes de búsqueda: primero el álbum real (Shazam) y luego la
+    discografía del artista (mejor cobertura)."""
+    import unicodedata
+
+    def no_acc(s):
+        return "".join(c for c in unicodedata.normalize("NFKD", s)
+                       if unicodedata.category(c) != "Mn")
+
+    base = no_acc(artist) if no_acc(artist).lower() != artist.lower() else artist
+    variants = []
+    if album:
+        variants += [f"{artist} {album}", f"{no_acc(artist)} {no_acc(album)}"]
+    variants += [
+        f"{artist} discografia",
+        f"{base} discography",
+        f"{base} album",
+        base,
+    ]
+    return list(dict.fromkeys(v.strip() for v in variants if v.strip()))
+
+
+def search_artist_multi(artist, max_results=3, album=""):
+    """Busca el artista en Knaben + TPB probando el álbum real (Shazam) y
+    variantes de discografía. Devuelve {info_hash, name, seeders, size} con seeders>0."""
+    for q in expand_artist_queries(artist, album):
+        combined = knaben_search(q, max_results=10)
+        for t in tpb_search(q, category=100, max_results=10):
+            combined.append({
+                "info_hash": t.get("info_hash", ""),
+                "name": t.get("name", ""),
+                "seeders": int(t.get("seeders") or 0),
+                "size": int(t.get("size") or 0),
+            })
+        with_seeds = [r for r in combined if r["seeders"] > 0 and r["info_hash"]]
+        if with_seeds:
+            with_seeds.sort(key=lambda x: x["seeders"], reverse=True)
+            return with_seeds[:max_results]
+    return []
+
+
 def magnet_link(torrent):
     ih   = torrent.get("info_hash", "")
     name = urllib.parse.quote(torrent.get("name", ""))
@@ -246,9 +367,18 @@ def run():
         report_lines.append(f"    Top canciones: {top5_str}")
         report_lines.append(f"    Buscar en web: {tpb_web_url(artist + ' discography')}")
 
-        results = tpb_search(f"{artist} discography", category=100, max_results=3)
-        if not results:
-            results = tpb_search(artist, category=100, max_results=3)
+        # Álbum real vía Shazam, usando la canción más escuchada del artista
+        album = ""
+        if top5:
+            meta = shazam_lookup(artist, top5[0][0])
+            album = meta.get("album", "")
+            if album:
+                year = meta.get("year", "")
+                album_str = f"    💿 Álbum (Shazam): {album}" + (f" ({year})" if year else "")
+                print(album_str)
+                report_lines.append(album_str)
+
+        results = search_artist_multi(artist, max_results=3, album=album)
 
         if results:
             for r in results:

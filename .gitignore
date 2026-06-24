@@ -10,6 +10,10 @@ config.json
 output/
 output_ebooks/
 
+# Estado / data personal generada en runtime
+download_history.json
+watchlist.json
+
 # Python
 __pycache__/
 *.pyc

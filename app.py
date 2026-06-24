@@ -124,32 +124,184 @@ def _spotify_save_results(data: dict):
     )
 
 
-def _search_song_torrent(artist: str, track: str) -> dict:
-    """Busca el mejor torrent para una canción. Devuelve dict con status found/not_found."""
-    queries = _expand_music_queries(f"{artist} {track}")
-    for q in queries:
-        results = _knaben_search_music(q, 10)
-        best = _best_torrent(results)
-        if best:
-            return {
-                "status": "found",
-                "name": best["name"],
-                "seeds": int(best.get("seeders", 0)),
-                "size": _size_human(best.get("size", 0)),
-                "info_hash": best.get("info_hash", ""),
-                "searched_at": time.strftime("%Y-%m-%d %H:%M"),
+# ─────────────────────────────────────────────────────────────────────────────
+# Metadatos de Shazam (catálogo Apple Music, sin API key) — da álbum/género/año
+# que el historial de Spotify no incluye, para buscar el torrent del álbum real.
+# ─────────────────────────────────────────────────────────────────────────────
+
+SHAZAM_CACHE_FILE = BASE_DIR / "output" / "shazam_cache.json"
+
+
+def _shazam_cache_load() -> dict:
+    if SHAZAM_CACHE_FILE.exists():
+        try:
+            return json.loads(SHAZAM_CACHE_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+
+def _shazam_cache_save(data: dict):
+    SHAZAM_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    SHAZAM_CACHE_FILE.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def _shazam_lookup(artist: str, track: str) -> dict:
+    """Devuelve {album, genre, year, artist, track, preview, artwork} desde
+    Shazam (catálogo Apple Music), o {} si falla. Cacheado a disco.
+    `preview` es un MP3/M4A de 30s reproducible; `artwork` una miniatura."""
+    cache = _shazam_cache_load()
+    key = f"{artist} — {track}"
+    cached = cache.get(key)
+    # Reutiliza la caché salvo entradas antiguas sin el campo `preview` (migración)
+    if cached is not None and (cached == {} or "preview" in cached):
+        return cached
+    out = {}
+    try:
+        url = "https://www.shazam.com/services/amapi/v1/catalog/US/search?" + \
+            _uparse_mod.urlencode({"term": f"{artist} {track}", "limit": 3, "types": "songs"})
+        req = _ureq_mod.Request(url, headers={"User-Agent": "Mozilla/5.0",
+                                              "Accept": "application/json"})
+        with _ureq_mod.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read())
+        songs = (data.get("results", {}).get("songs", {}).get("data", []))
+        if songs:
+            a = songs[0].get("attributes", {})
+            artwork = (a.get("artwork") or {}).get("url", "")
+            if artwork:  # plantilla con {w}x{h} → miniatura concreta
+                artwork = artwork.replace("{w}", "120").replace("{h}", "120")
+            out = {
+                "album":   a.get("albumName", ""),
+                "genre":   (a.get("genreNames") or [""])[0],
+                "year":    (a.get("releaseDate") or "")[:4],
+                "artist":  a.get("artistName", ""),
+                "track":   a.get("name", ""),
+                "preview": (a.get("previews") or [{}])[0].get("url", ""),
+                "artwork": artwork,
             }
-        tpb_results = _tpb_search_cached(q, 101, 10)
-        tpb_normalized = [
-            {
-                "name": r.get("name", ""),
-                "seeders": int(r.get("seeders", 0)),
-                "size": int(r.get("size", 0)),
-                "info_hash": r.get("info_hash", ""),
-            }
-            for r in tpb_results
+    except Exception:
+        out = {}
+    cache[key] = out
+    _shazam_cache_save(cache)
+    return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Biblioteca local de música — para marcar qué canciones ya están descargadas
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _norm_music(s: str) -> str:
+    import unicodedata as _ud, re as _re
+    s = _ud.normalize("NFD", (s or "").lower())
+    s = "".join(c for c in s if _ud.category(c) != "Mn")
+    s = _re.sub(r"\(feat[^)]*\)|\[feat[^\]]*\]", " ", s)   # quita (feat. ...)
+    s = _re.sub(r"[^a-z0-9 ]", " ", s)
+    return _re.sub(r"\s+", " ", s).strip()
+
+
+@st.cache_data(show_spinner=False)
+def _scan_music_library(folder: str) -> set:
+    """Escanea la carpeta de música y devuelve un set de claves
+    'artista|||titulo' normalizadas (tags ID3 vía mutagen + nombre de archivo).
+    Cacheado; usa _scan_music_library.clear() para re-escanear."""
+    import re as _re
+    keys: set = set()
+    base = Path(folder) if folder else None
+    if not base or not base.exists():
+        return keys
+    try:
+        from mutagen import File as _MFile
+        has_mutagen = True
+    except Exception:
+        has_mutagen = False
+    exts = {".mp3", ".flac", ".m4a", ".ogg", ".opus", ".wav", ".aac", ".wma", ".alac"}
+    for p in base.rglob("*"):
+        if p.suffix.lower() not in exts:
+            continue
+        artist = title = ""
+        if has_mutagen:
+            try:
+                mf = _MFile(str(p), easy=True)
+                if mf is not None and mf.tags:
+                    artist = (mf.tags.get("artist") or [""])[0]
+                    title  = (mf.tags.get("title") or [""])[0]
+            except Exception:
+                pass
+        if artist and title:
+            keys.add(f"{_norm_music(artist)}|||{_norm_music(title)}")
+        # Fallback: "Artista - Titulo" deducido del nombre de archivo
+        m = _re.match(r"^(.+?)\s*[-–—]\s*(.+)$", p.stem)
+        if m:
+            keys.add(f"{_norm_music(m.group(1))}|||{_norm_music(m.group(2))}")
+    return keys
+
+
+def _is_downloaded(lib_keys: set, artist: str, track: str) -> bool:
+    if not lib_keys:
+        return False
+    return f"{_norm_music(artist)}|||{_norm_music(track)}" in lib_keys
+
+
+def _song_query_variants(artist: str, track: str, album: str = "") -> list:
+    """Variantes de búsqueda para una canción: primero la canción exacta,
+    luego el álbum real (vía Shazam) y por último la discografía del artista
+    (mejor cobertura, ya que la música casi siempre se publica como álbum)."""
+    import unicodedata as _ud
+
+    def _no_acc(s: str) -> str:
+        return "".join(c for c in _ud.normalize("NFKD", s) if _ud.category(c) != "Mn")
+
+    artist_n, track_n = _no_acc(artist), _no_acc(track)
+    variants = [
+        f"{artist} {track}",        # canción exacta
+        f"{artist_n} {track_n}",    # canción exacta sin acentos
+    ]
+    if album:
+        variants += [
+            f"{artist} {album}",            # álbum real (Shazam)
+            f"{_no_acc(artist)} {_no_acc(album)}",
         ]
-        best = _best_torrent(tpb_normalized)
+    variants += [
+        f"{artist} discografia",    # nivel álbum / discografía
+        f"{artist_n} discography",
+        f"{artist_n} album",
+        artist_n,                   # artista solo (último recurso)
+    ]
+    return list(dict.fromkeys(v.strip() for v in variants if v.strip()))
+
+
+def _all_sources_search(q: str, n: int = 10) -> list:
+    """Busca en todas las fuentes (Knaben, SolidTorrents, BitSearch, TPB)
+    y devuelve la lista combinada de resultados normalizados."""
+    results = []
+    results += _knaben_search_music(q, n)
+    results += _solid_search_music(q, n)
+    results += _bitsearch_search_music(q, n)
+    # TPB cat 100 = Música (todo) → cubre MP3 y lossless/FLAC
+    for r in _tpb_search_cached(q, 100, n):
+        results.append({
+            "name": r.get("name", ""),
+            "seeders": int(r.get("seeders", 0)),
+            "leechers": int(r.get("leechers", 0)),
+            "size": int(r.get("size", 0)),
+            "info_hash": r.get("info_hash", ""),
+            "source": "TPB",
+        })
+    return results
+
+
+def _search_song_torrent(artist: str, track: str, use_shazam: bool = True) -> dict:
+    """Busca el mejor torrent para una canción en múltiples fuentes
+    (Knaben, SolidTorrents, BitSearch, The Pirate Bay), probando primero la
+    canción exacta, luego el álbum real (vía Shazam) y la discografía.
+    Devuelve dict con status found/not_found."""
+    meta  = _shazam_lookup(artist, track) if use_shazam else {}
+    album = meta.get("album", "")
+    extra = {"album": album, "genre": meta.get("genre", ""), "year": meta.get("year", "")}
+    for q in _song_query_variants(artist, track, album):
+        best = _best_torrent(_all_sources_search(q, 10))
         if best:
             return {
                 "status": "found",
@@ -157,9 +309,12 @@ def _search_song_torrent(artist: str, track: str) -> dict:
                 "seeds": int(best.get("seeders", 0)),
                 "size": _size_human(best.get("size", 0)),
                 "info_hash": best.get("info_hash", ""),
+                "source": best.get("source", ""),
+                "query": q,
                 "searched_at": time.strftime("%Y-%m-%d %H:%M"),
+                **extra,
             }
-    return {"status": "not_found", "searched_at": time.strftime("%Y-%m-%d %H:%M")}
+    return {"status": "not_found", "searched_at": time.strftime("%Y-%m-%d %H:%M"), **extra}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -219,48 +374,116 @@ def _magnet_button(label: str, mag_url: str, key: str = "", full_width: bool = T
     )
 
 
+def _song_preview_ui(artist: str, track: str, ui_key: str) -> None:
+    """Botón '▶️ Muestra' que, al pulsarlo, reproduce 30s de la canción y
+    muestra la carátula (vía Shazam/Apple Music). El estado persiste por fila."""
+    open_set = st.session_state.setdefault("_previews_open", set())
+    if st.button("▶️ Muestra", key=f"prev_btn_{ui_key}", use_container_width=True):
+        if ui_key in open_set:
+            open_set.discard(ui_key)   # toggle: vuelve a pulsar para ocultar
+        else:
+            open_set.add(ui_key)
+    if ui_key in open_set:
+        with st.spinner("Cargando muestra…"):
+            meta = _shazam_lookup(artist, track)
+        pv = meta.get("preview", "")
+        if pv:
+            art = meta.get("artwork", "")
+            if art:
+                st.image(art, width=80)
+            st.audio(pv)
+        else:
+            st.caption("🔇 Sin muestra disponible")
+
+
 def _knaben_search_music(q: str, n: int = 12) -> list:
+    # API v1 POST en api.knaben.org. Nota: el host .eu y el parámetro order_by
+    # ignoran el query (devuelven top-seeders global), así que pedimos por
+    # relevancia con filtro de categoría audio (1000000) y ordenamos por
+    # seeders del lado del cliente.
     try:
-        url = "https://knaben.eu/api/v1/search?" + _uparse_mod.urlencode({
-            "search": q, "categories": "audio",
-            "orderBy": "seeders", "orderType": "desc", "size": n,
-        })
-        req = _ureq_mod.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        body = json.dumps({
+            "query": q,
+            "categories": [1000000],   # 1000000 = Audio
+            "hide_unsafe": True,
+            "size": max(n, 20),
+        }).encode()
+        req = _ureq_mod.Request(
+            "https://api.knaben.org/v1",
+            data=body,
+            headers={"User-Agent": "Mozilla/5.0", "Content-Type": "application/json"},
+        )
         with _ureq_mod.urlopen(req, timeout=10) as r:
             data = json.loads(r.read())
         hits = data.get("hits") or []
         out = []
         for h in hits:
-            ih    = (h.get("info_hash") or "").lower()
+            ih    = (h.get("hash") or h.get("info_hash") or "").lower()
             name  = h.get("title") or h.get("name") or ""
             seeds = int(h.get("seeders") or 0)
+            peers = int(h.get("peers") or h.get("leechers") or 0)
             size_b = int(h.get("bytes") or 0)
             if not ih or not name:
                 continue
-            leechers = int(h.get("leechers") or 0)
-            out.append({"name": name, "seeders": seeds, "leechers": leechers, "size": size_b, "info_hash": ih, "source": "Knaben"})
+            out.append({"name": name, "seeders": seeds, "leechers": peers,
+                        "size": size_b, "info_hash": ih, "source": "Knaben"})
+        out.sort(key=lambda r: r["seeders"], reverse=True)
         return out[:n]
     except Exception:
         return []
 
 
-def _expand_music_queries(q: str) -> list:
-    import unicodedata as _ud
-    variants = [q]
-    no_acc = "".join(c for c in _ud.normalize("NFKD", q) if _ud.category(c) != "Mn")
-    if no_acc.lower() != q.lower():
-        variants.append(no_acc)
-    base = no_acc if no_acc.lower() != q.lower() else q
-    q_lower = q.lower()
-    if "discografia" not in q_lower and "discography" not in q_lower:
-        variants.append(base + " discografia")
-        variants.append(base + " discography")
-    words = q.strip().split()
-    if len(words) >= 2:
-        last = words[-1]
-        variants.append(last + " discografia")
-        variants.append(last)
-    return list(dict.fromkeys(v.strip() for v in variants if v.strip()))
+def _solid_search_music(q: str, n: int = 12) -> list:
+    try:
+        url = "https://solidtorrents.to/api/v1/search?" + _uparse_mod.urlencode({
+            "q": q, "sort": "seeders", "category": "music", "size": n,
+        })
+        req = _ureq_mod.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with _ureq_mod.urlopen(req, timeout=8) as r:
+            data = json.loads(r.read())
+        hits = (data.get("hits") or {}).get("hits") or data.get("results") or []
+        out  = []
+        for h in hits:
+            src    = h.get("_source") or h
+            ih     = (src.get("infohash") or src.get("info_hash") or "").lower()
+            name   = src.get("title") or src.get("name") or ""
+            swarm  = src.get("swarm") or {}
+            seeds  = int(swarm.get("seeders") or src.get("seeders") or 0)
+            peers  = int(swarm.get("leechers") or src.get("leechers") or 0)
+            size_b = int(src.get("size") or 0)
+            if not ih or not name:
+                continue
+            out.append({"name": name, "seeders": seeds, "leechers": peers,
+                        "size": size_b, "info_hash": ih, "source": "Solid"})
+        return out[:n]
+    except Exception:
+        return []
+
+
+def _bitsearch_search_music(q: str, n: int = 20) -> list:
+    try:
+        url = "https://bitsearch.to/api/v1/search?" + _uparse_mod.urlencode({
+            "q": q, "category": "music", "subcat": "", "page": 1,
+        })
+        req = _ureq_mod.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
+        with _ureq_mod.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read())
+        hits = data.get("results") or data.get("hits") or []
+        out  = []
+        for h in hits:
+            ih     = (h.get("infoHash") or h.get("info_hash") or h.get("infohash") or "").lower()
+            name   = h.get("name") or h.get("title") or ""
+            stats  = h.get("stats") or {}
+            seeds  = int(stats.get("seeders") or h.get("seeders") or 0)
+            peers  = int(stats.get("leechers") or h.get("leechers") or 0)
+            size_b = int(h.get("size") or 0)
+            if not ih or not name:
+                continue
+            out.append({"name": name, "seeders": seeds, "leechers": peers,
+                        "size": size_b, "info_hash": ih, "source": "BitSearch"})
+        return out[:n]
+    except Exception:
+        return []
 
 
 def _best_torrent(results: list):
@@ -271,6 +494,54 @@ def _best_torrent(results: list):
                if any(k in r.get("name", "").upper() for k in ("320", "MP3"))]
     pool = quality if quality else with_seeds
     return max(pool, key=lambda r: int(r.get("seeders", 0)))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Top de canciones en tendencia — chart público de Apple Music (sin API key)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# País → etiqueta para el chart
+APPLE_CHART_COUNTRIES = {
+    "mx": "🇲🇽 México", "us": "🇺🇸 EE.UU.", "es": "🇪🇸 España",
+    "ar": "🇦🇷 Argentina", "co": "🇨🇴 Colombia", "cl": "🇨🇱 Chile",
+    "gb": "🇬🇧 Reino Unido", "global": "🌎 Global (US)",
+}
+
+# Género → id de Apple Music (0 = todos)
+APPLE_CHART_GENRES = {
+    "Todos": 0, "Pop": 14, "Hip-Hop/Rap": 18, "Latino": 12,
+    "Rock": 21, "Dance": 17, "Electrónica": 7, "Alternativa": 20,
+    "R&B/Soul": 15, "Country": 6, "Reggae": 19, "Jazz": 11, "Clásica": 5,
+}
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _apple_top_songs(country: str, genre_id: int, limit: int = 50) -> list:
+    """Top de canciones del chart de Apple Music vía RSS público (sin API key).
+    Devuelve [{artist, track, genre}] deduplicado. Cacheado 1 hora."""
+    cc = "us" if country == "global" else country
+    genre_path = f"genre={genre_id}/" if genre_id else ""
+    url = f"https://itunes.apple.com/{cc}/rss/topsongs/limit={limit}/{genre_path}json"
+    try:
+        req = _ureq_mod.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with _ureq_mod.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read())
+        entries = data.get("feed", {}).get("entry", [])
+        out, seen = [], set()
+        for e in entries:
+            artist = (e.get("im:artist", {}) or {}).get("label", "")
+            track  = (e.get("im:name", {}) or {}).get("label", "")
+            genre  = (e.get("category", {}) or {}).get("attributes", {}).get("label", "")
+            if not artist or not track:
+                continue
+            key = f"{artist}|||{track}".lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({"artist": artist, "track": track, "genre": genre})
+        return out
+    except Exception:
+        return []
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -620,7 +891,121 @@ def page_musica():
 
     st.markdown("---")
 
-    tab1, tab2, tab3 = st.tabs(["▶ Ejecutar búsqueda", "🔎 Buscar artista / canción", "📂 Resultados anteriores"])
+    tab1, tab2, tab_trend, tab3 = st.tabs([
+        "▶ Ejecutar búsqueda", "🔎 Buscar artista / canción",
+        "🔥 Tendencias", "📂 Resultados anteriores",
+    ])
+
+    # ── Tab Tendencias: top de canciones de Apple Music + descarga ────────────
+    with tab_trend:
+        st.markdown(
+            "Las **canciones más populares** del momento (chart de Apple Music). "
+            "Busca el torrent de cada una en todas las fuentes (con álbum de Shazam) "
+            "y marca las que ya tienes en tu biblioteca."
+        )
+        tcol1, tcol2, tcol3 = st.columns([2, 2, 1])
+        with tcol1:
+            t_country = st.selectbox(
+                "País", list(APPLE_CHART_COUNTRIES.keys()),
+                format_func=lambda c: APPLE_CHART_COUNTRIES[c],
+                key="trend_country",
+            )
+        with tcol2:
+            t_genre = st.selectbox("Género", list(APPLE_CHART_GENRES.keys()),
+                                   key="trend_genre")
+        with tcol3:
+            t_limit = st.selectbox("Top", [25, 50, 100], index=1, key="trend_limit")
+
+        top_songs = _apple_top_songs(t_country, APPLE_CHART_GENRES[t_genre], t_limit)
+
+        if not top_songs:
+            st.warning("No se pudo cargar el chart. Reintenta en unos segundos.")
+        else:
+            # Biblioteca local para marcar descargadas
+            lib_keys = _scan_music_library(cfg.get("music_folder", ""))
+            results  = _spotify_load_results()
+
+            n_dl = sum(1 for s in top_songs
+                       if _is_downloaded(lib_keys, s["artist"], s["track"]))
+            mt1, mt2 = st.columns(2)
+            mt1.metric("🔥 En el top", len(top_songs))
+            mt2.metric("⬇️ Ya en biblioteca", n_dl)
+
+            cba, cbb = st.columns(2)
+            run_all_trend = cba.button("🚀 Buscar y descargar todas las que faltan",
+                                       type="primary", use_container_width=True,
+                                       key="trend_run_all")
+            if cbb.button("🔄 Re-escanear biblioteca", use_container_width=True,
+                          key="trend_rescan"):
+                _scan_music_library.clear()
+                st.rerun()
+
+            if run_all_trend:
+                pending = [s for s in top_songs
+                           if not _is_downloaded(lib_keys, s["artist"], s["track"])]
+                prog = st.progress(0.0)
+                ptxt = st.empty()
+                for idx, s in enumerate(pending):
+                    label = f"{s['artist']} — {s['track']}"
+                    ptxt.text(f"Buscando {idx+1}/{len(pending)}: {label}…")
+                    prog.progress((idx + 1) / max(len(pending), 1))
+                    results[label] = _search_song_torrent(s["artist"], s["track"])
+                    if results[label].get("status") == "found":
+                        mag = _build_magnet(results[label].get("info_hash", ""),
+                                            results[label].get("name", ""))
+                        subprocess.Popen(["open", mag])
+                    if idx % 5 == 0:
+                        _spotify_save_results(results)
+                    time.sleep(1.0)
+                _spotify_save_results(results)
+                ptxt.success(f"✅ Listo — {len(pending)} canciones procesadas.")
+                st.rerun()
+
+            st.markdown("---")
+            for i, s in enumerate(top_songs):
+                cache_key  = f"{s['artist']} — {s['track']}"
+                res        = results.get(cache_key, {})
+                status     = res.get("status")
+                downloaded = _is_downloaded(lib_keys, s["artist"], s["track"])
+                with st.container(border=True):
+                    ci, cs, ca = st.columns([4, 2, 2])
+                    with ci:
+                        badge = " &nbsp;⬇️ **En biblioteca**" if downloaded else ""
+                        st.markdown(f"**{i+1}. {s['artist']}** — {s['track']}{badge}",
+                                    unsafe_allow_html=True)
+                        st.caption(f"🎵 {s.get('genre','')}")
+                        _song_preview_ui(s["artist"], s["track"], f"trend_{i}")
+                    with cs:
+                        if downloaded:
+                            st.caption("⬇️ Ya descargada")
+                        elif status == "found":
+                            seeds = res.get("seeds", 0)
+                            ic = "🟢" if seeds >= 20 else ("🟡" if seeds >= 5 else "🔴")
+                            st.caption(f"✅ {res.get('name','')[:50]}")
+                            st.caption(f"{ic} {seeds} seeds · {res.get('size','?')}"
+                                       f" · {res.get('source','')}")
+                        elif status == "not_found":
+                            st.caption("❌ Sin resultado")
+                        else:
+                            st.caption("⏳ Sin buscar")
+                    with ca:
+                        if status == "found" and not downloaded:
+                            mag = _build_magnet(res.get("info_hash", ""),
+                                                res.get("name", ""))
+                            _magnet_button("🧲 Abrir", mag)
+                        elif not downloaded:
+                            if st.button("🔍 Buscar", key=f"trend_s_{i}",
+                                         use_container_width=True):
+                                with st.spinner(f"Buscando {cache_key}…"):
+                                    results[cache_key] = _search_song_torrent(
+                                        s["artist"], s["track"])
+                                    _spotify_save_results(results)
+                                    if results[cache_key].get("status") == "found":
+                                        mag = _build_magnet(
+                                            results[cache_key].get("info_hash", ""),
+                                            results[cache_key].get("name", ""))
+                                        subprocess.Popen(["open", mag])
+                                st.rerun()
 
     with tab1:
         st.markdown(
@@ -692,29 +1077,8 @@ def page_musica():
             return f"magnet:?xt=urn:btih:{ih}&dn={name}&{tr}"
 
         def _knaben_music(q, n=12):
-            try:
-                url = "https://knaben.eu/api/v1/search?" + _uparse_mod.urlencode({
-                    "search": q, "categories": "audio",
-                    "orderBy": "seeders", "orderType": "desc", "size": n,
-                })
-                req = _ureq_mod.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-                with _ureq_mod.urlopen(req, timeout=10) as r:
-                    data = json.loads(r.read())
-                hits = data.get("hits") or []
-                out  = []
-                for h in hits:
-                    ih    = (h.get("info_hash") or "").lower()
-                    name  = h.get("title") or h.get("name") or ""
-                    seeds = int(h.get("seeders") or 0)
-                    peers = int(h.get("leechers") or 0)
-                    size_b= int(h.get("bytes") or 0)
-                    if not ih or not name:
-                        continue
-                    out.append({"name": name, "seeders": seeds, "leechers": peers,
-                                "size": size_b, "info_hash": ih, "source": "Knaben"})
-                return out[:n]
-            except Exception:
-                return []
+            # Delega en la implementación corregida a nivel de módulo (API POST .org).
+            return _knaben_search_music(q, n)
 
         def _solid_music(q, n=12):
             try:
@@ -1824,6 +2188,25 @@ def page_spotify():
                 canciones = json.loads(canciones_path.read_text(encoding="utf-8"))
                 results   = _spotify_load_results()
 
+                # ── Biblioteca local (marcar descargadas) ─────────────────────
+                music_folder = cfg.get("music_folder", "")
+                lib_keys     = _scan_music_library(music_folder)
+                dl_set       = {f"{c['artist']} — {c['track']}" for c in canciones
+                                if _is_downloaded(lib_keys, c["artist"], c["track"])}
+
+                lib_col1, lib_col2 = st.columns([3, 1])
+                lib_col1.caption(
+                    f"📂 Biblioteca: `{music_folder}` — "
+                    f"{len(lib_keys):,} pistas indexadas"
+                    if lib_keys else
+                    f"📂 Biblioteca vacía o no encontrada: `{music_folder}` "
+                    "(ajusta la carpeta en ⚙️ Configuración)"
+                )
+                if lib_col2.button("🔄 Re-escanear", use_container_width=True,
+                                   key="spo_rescan"):
+                    _scan_music_library.clear()
+                    st.rerun()
+
                 # ── Métricas ──────────────────────────────────────────────────
                 n_total     = len(canciones)
                 n_found     = sum(1 for c in canciones
@@ -1831,12 +2214,14 @@ def page_spotify():
                 n_not_found = sum(1 for c in canciones
                                   if results.get(f"{c['artist']} — {c['track']}", {}).get("status") == "not_found")
                 n_pending   = n_total - n_found - n_not_found
+                n_dl        = len(dl_set)
 
-                m1, m2, m3, m4 = st.columns(4)
+                m1, m2, m3, m4, m5 = st.columns(5)
                 m1.metric("Total canciones", n_total)
                 m2.metric("✅ Encontradas",  n_found)
                 m3.metric("❌ Sin resultado", n_not_found)
                 m4.metric("⏳ Sin buscar",    n_pending)
+                m5.metric("⬇️ En biblioteca", n_dl)
 
                 st.markdown("---")
 
@@ -1849,12 +2234,15 @@ def page_spotify():
                 retry_nf   = col_b2.button("🔄 Re-buscar sin resultado",
                                            disabled=(n_not_found == 0),
                                            use_container_width=True)
+                skip_owned = st.checkbox("Omitir las que ya tengo en la biblioteca",
+                                         value=True, key="spo_skip_owned")
 
                 if run_all or retry_nf:
                     to_search = [
                         c for c in canciones
-                        if (run_all and f"{c['artist']} — {c['track']}" not in results)
-                        or (retry_nf and results.get(f"{c['artist']} — {c['track']}", {}).get("status") == "not_found")
+                        if ((run_all and f"{c['artist']} — {c['track']}" not in results)
+                            or (retry_nf and results.get(f"{c['artist']} — {c['track']}", {}).get("status") == "not_found"))
+                        and not (skip_owned and f"{c['artist']} — {c['track']}" in dl_set)
                     ]
                     prog_bar  = st.progress(0.0)
                     prog_text = st.empty()
@@ -1880,7 +2268,8 @@ def page_spotify():
                 # ── Filtro ────────────────────────────────────────────────────
                 filtro = st.radio(
                     "Filtrar",
-                    ["Todas", "✅ Encontradas", "❌ Sin resultado", "⏳ Sin buscar"],
+                    ["Todas", "✅ Encontradas", "❌ Sin resultado", "⏳ Sin buscar",
+                     "⬇️ Descargadas", "📥 Faltantes"],
                     horizontal=True,
                     key="spo_filtro",
                 )
@@ -1891,6 +2280,8 @@ def page_spotify():
                     if filtro == "✅ Encontradas":   return status == "found"
                     if filtro == "❌ Sin resultado":  return status == "not_found"
                     if filtro == "⏳ Sin buscar":     return status is None
+                    if filtro == "⬇️ Descargadas":   return key in dl_set
+                    if filtro == "📥 Faltantes":     return key not in dl_set
                     return True
 
                 visible = [c for c in canciones if _filtrar(c)]
@@ -1904,29 +2295,42 @@ def page_spotify():
 
                 # ── Filas de canciones ────────────────────────────────────────
                 for i, c in enumerate(visible):
-                    cache_key = f"{c['artist']} — {c['track']}"
-                    res       = results.get(cache_key, {})
-                    status    = res.get("status")
-                    plays     = c.get("plays", 0)
+                    cache_key   = f"{c['artist']} — {c['track']}"
+                    res         = results.get(cache_key, {})
+                    status      = res.get("status")
+                    plays       = c.get("plays", 0)
+                    downloaded  = cache_key in dl_set
 
                     with st.container(border=True):
                         col_info, col_status, col_action = st.columns([4, 2, 2])
 
                         with col_info:
-                            st.markdown(f"**{c['artist']}** — {c['track']}")
-                            st.caption(f"🔁 {plays} plays")
+                            dl_badge = " &nbsp;⬇️ **En biblioteca**" if downloaded else ""
+                            st.markdown(f"**{c['artist']}** — {c['track']}{dl_badge}",
+                                        unsafe_allow_html=True)
+                            album = res.get("album", "")
+                            year  = res.get("year", "")
+                            meta_bits = [f"🔁 {plays} plays"]
+                            if album:
+                                meta_bits.append(f"💿 {album}" + (f" ({year})" if year else ""))
+                            st.caption(" · ".join(meta_bits))
+                            _song_preview_ui(c["artist"], c["track"], f"spo_{i}")
 
                         with col_status:
+                            if downloaded:
+                                st.caption("⬇️ Ya descargada")
                             if status == "found":
                                 name_t = res.get("name", "")[:60]
                                 seeds  = res.get("seeds", 0)
                                 size   = res.get("size", "?")
+                                src    = res.get("source", "")
                                 seed_icon = "🟢" if seeds >= 20 else ("🟡" if seeds >= 5 else "🔴")
                                 st.caption(f"✅ {name_t}")
-                                st.caption(f"{seed_icon} {seeds} seeds · {size}")
+                                src_tag = f" · {src}" if src else ""
+                                st.caption(f"{seed_icon} {seeds} seeds · {size}{src_tag}")
                             elif status == "not_found":
                                 st.caption("❌ Sin resultado")
-                            else:
+                            elif not downloaded:
                                 st.caption("⏳ Sin buscar")
 
                         with col_action:
