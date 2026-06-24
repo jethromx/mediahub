@@ -36,6 +36,7 @@ DEFAULT_CONFIG = {
     "phone_limit_gb":    32,
     "top_tracks":        100,
     "top_books":         120,
+    "min_seeds":         3,
     "genres": [
         "rock", "pop", "electronic", "hip-hop", "jazz",
         "metal", "classical", "reggae", "latin", "blues",
@@ -169,9 +170,8 @@ def _shazam_lookup(artist: str, track: str) -> dict:
         songs = (data.get("results", {}).get("songs", {}).get("data", []))
         if songs:
             a = songs[0].get("attributes", {})
+            # URL cruda con plantilla {w}x{h}; el consumidor elige el tamaño
             artwork = (a.get("artwork") or {}).get("url", "")
-            if artwork:  # plantilla con {w}x{h} → miniatura concreta
-                artwork = artwork.replace("{w}", "120").replace("{h}", "120")
             out = {
                 "album":   a.get("albumName", ""),
                 "genre":   (a.get("genreNames") or [""])[0],
@@ -238,10 +238,72 @@ def _scan_music_library(folder: str) -> set:
     return keys
 
 
-def _is_downloaded(lib_keys: set, artist: str, track: str) -> bool:
-    if not lib_keys:
-        return False
-    return f"{_norm_music(artist)}|||{_norm_music(track)}" in lib_keys
+def _is_downloaded(lib_keys: set, artist: str, track: str,
+                   ledger: dict = None) -> bool:
+    """True si la canción está en la biblioteca local o marcada `completed`
+    en el ledger de descargas."""
+    key = f"{_norm_music(artist)}|||{_norm_music(track)}"
+    if lib_keys and key in lib_keys:
+        return True
+    if ledger and ledger.get(f"{artist} — {track}", {}).get("status") == "completed":
+        return True
+    return False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ledger de descargas — registra qué se pidió/descargó para futuras consultas
+# ─────────────────────────────────────────────────────────────────────────────
+
+LEDGER_FILE = BASE_DIR / "output" / "downloads_ledger.json"
+
+
+def _ledger_load() -> dict:
+    if LEDGER_FILE.exists():
+        try:
+            return json.loads(LEDGER_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+
+def _ledger_save(data: dict):
+    LEDGER_FILE.parent.mkdir(parents=True, exist_ok=True)
+    LEDGER_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2),
+                           encoding="utf-8")
+
+
+def _ledger_record_request(artist: str, track: str, result: dict) -> None:
+    """Registra (o actualiza) una descarga pedida al pulsar 🧲 Abrir."""
+    ledger = _ledger_load()
+    key = f"{artist} — {track}"
+    prev = ledger.get(key, {})
+    ledger[key] = {
+        "artist": artist, "track": track,
+        "info_hash": result.get("info_hash", ""),
+        "magnet": _build_magnet(result.get("info_hash", ""), result.get("name", "")),
+        "torrent_name": result.get("name", ""),
+        "source": result.get("source", ""),
+        "seeds": result.get("seeds", 0),
+        "size": result.get("size", ""),
+        "requested_at": time.strftime("%Y-%m-%d %H:%M"),
+        "status": prev.get("status", "requested"),
+        "completed_at": prev.get("completed_at"),
+        "file_path": prev.get("file_path"),
+        "tagged": prev.get("tagged", False),
+    }
+    _ledger_save(ledger)
+
+
+def _ledger_status(ledger: dict, artist: str, track: str) -> str:
+    """'completed' | 'requested' | '' para una canción."""
+    return ledger.get(f"{artist} — {track}", {}).get("status", "") if ledger else ""
+
+
+def _download_and_record(artist: str, track: str, result: dict) -> None:
+    """Abre el magnet en el cliente torrent del SO y registra la petición."""
+    mag = _build_magnet(result.get("info_hash", ""), result.get("name", ""))
+    subprocess.Popen(["open", mag])
+    _ledger_record_request(artist, track, result)
 
 
 def _song_query_variants(artist: str, track: str, album: str = "") -> list:
@@ -292,29 +354,42 @@ def _all_sources_search(q: str, n: int = 10) -> list:
     return results
 
 
-def _search_song_torrent(artist: str, track: str, use_shazam: bool = True) -> dict:
+def _search_song_torrent(artist: str, track: str, use_shazam: bool = True,
+                         min_seeds: int = 3) -> dict:
     """Busca el mejor torrent para una canción en múltiples fuentes
     (Knaben, SolidTorrents, BitSearch, The Pirate Bay), probando primero la
     canción exacta, luego el álbum real (vía Shazam) y la discografía.
-    Devuelve dict con status found/not_found."""
+    Elige el torrent más sano (ver _best_torrent). Devuelve dict found/not_found."""
     meta  = _shazam_lookup(artist, track) if use_shazam else {}
     album = meta.get("album", "")
     extra = {"album": album, "genre": meta.get("genre", ""), "year": meta.get("year", "")}
+    # Guardamos el mejor "con pocos seeds" por si ninguna variante da uno sano
+    fallback = None
     for q in _song_query_variants(artist, track, album):
-        best = _best_torrent(_all_sources_search(q, 10))
-        if best:
-            return {
-                "status": "found",
-                "name": best["name"],
-                "seeds": int(best.get("seeders", 0)),
-                "size": _size_human(best.get("size", 0)),
-                "info_hash": best.get("info_hash", ""),
-                "source": best.get("source", ""),
-                "query": q,
-                "searched_at": time.strftime("%Y-%m-%d %H:%M"),
-                **extra,
-            }
+        best = _best_torrent(_all_sources_search(q, 10), single_track=True,
+                             min_seeds=min_seeds)
+        if best and not best.get("low_seeds"):
+            return _song_result_found(best, q, extra)
+        if best and fallback is None:
+            fallback = (best, q)
+    if fallback:
+        return _song_result_found(fallback[0], fallback[1], extra)
     return {"status": "not_found", "searched_at": time.strftime("%Y-%m-%d %H:%M"), **extra}
+
+
+def _song_result_found(best: dict, q: str, extra: dict) -> dict:
+    return {
+        "status": "found",
+        "name": best["name"],
+        "seeds": int(best.get("seeders", 0)),
+        "size": _size_human(best.get("size", 0)),
+        "info_hash": best.get("info_hash", ""),
+        "source": best.get("source", ""),
+        "low_seeds": bool(best.get("low_seeds", False)),
+        "query": q,
+        "searched_at": time.strftime("%Y-%m-%d %H:%M"),
+        **extra,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -390,7 +465,7 @@ def _song_preview_ui(artist: str, track: str, ui_key: str) -> None:
         if pv:
             art = meta.get("artwork", "")
             if art:
-                st.image(art, width=80)
+                st.image(art.replace("{w}", "300").replace("{h}", "300"), width=80)
             st.audio(pv)
         else:
             st.caption("🔇 Sin muestra disponible")
@@ -486,14 +561,33 @@ def _bitsearch_search_music(q: str, n: int = 20) -> list:
         return []
 
 
-def _best_torrent(results: list):
+def _torrent_health_score(r: dict, single_track: bool) -> float:
+    """Score de salud: prioriza seeds, penaliza torrents enormes cuando se busca
+    una canción (una discografía de decenas de GB con pocos seeds no completa),
+    y usa la calidad (FLAC/320/MP3) solo como pequeño desempate."""
+    seeds = int(r.get("seeders", 0))
+    name  = (r.get("name", "") or "").upper()
+    quality_bonus = 1.3 if any(k in name for k in ("FLAC", "320", "MP3")) else 1.0
+    size_gb = int(r.get("size", 0)) / 1e9
+    size_penalty = 1.0
+    if single_track and size_gb > 1.5:
+        size_penalty = 1 + (size_gb - 1.5) * 0.15
+    return seeds * quality_bonus / size_penalty
+
+
+def _best_torrent(results: list, single_track: bool = True, min_seeds: int = 3):
+    """Elige el torrent más sano. Descarta los que tengan menos de `min_seeds`;
+    si ninguno llega al mínimo, devuelve el mejor disponible marcado con
+    `low_seeds=True` para que la UI avise. Devuelve None si no hay nada con seeds."""
     with_seeds = [r for r in results if int(r.get("seeders", 0)) > 0]
     if not with_seeds:
         return None
-    quality = [r for r in with_seeds
-               if any(k in r.get("name", "").upper() for k in ("320", "MP3"))]
-    pool = quality if quality else with_seeds
-    return max(pool, key=lambda r: int(r.get("seeders", 0)))
+    healthy = [r for r in with_seeds if int(r.get("seeders", 0)) >= min_seeds]
+    pool, low = (healthy, False) if healthy else (with_seeds, True)
+    best = max(pool, key=lambda r: _torrent_health_score(r, single_track))
+    best = dict(best)
+    best["low_seeds"] = low
+    return best
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -921,12 +1015,14 @@ def page_musica():
         if not top_songs:
             st.warning("No se pudo cargar el chart. Reintenta en unos segundos.")
         else:
-            # Biblioteca local para marcar descargadas
-            lib_keys = _scan_music_library(cfg.get("music_folder", ""))
-            results  = _spotify_load_results()
+            # Biblioteca local + ledger para marcar descargadas/pedidas
+            lib_keys  = _scan_music_library(cfg.get("music_folder", ""))
+            ledger    = _ledger_load()
+            results   = _spotify_load_results()
+            min_seeds = int(cfg.get("min_seeds", 3))
 
             n_dl = sum(1 for s in top_songs
-                       if _is_downloaded(lib_keys, s["artist"], s["track"]))
+                       if _is_downloaded(lib_keys, s["artist"], s["track"], ledger))
             mt1, mt2 = st.columns(2)
             mt1.metric("🔥 En el top", len(top_songs))
             mt2.metric("⬇️ Ya en biblioteca", n_dl)
@@ -942,18 +1038,17 @@ def page_musica():
 
             if run_all_trend:
                 pending = [s for s in top_songs
-                           if not _is_downloaded(lib_keys, s["artist"], s["track"])]
+                           if not _is_downloaded(lib_keys, s["artist"], s["track"], ledger)]
                 prog = st.progress(0.0)
                 ptxt = st.empty()
                 for idx, s in enumerate(pending):
                     label = f"{s['artist']} — {s['track']}"
                     ptxt.text(f"Buscando {idx+1}/{len(pending)}: {label}…")
                     prog.progress((idx + 1) / max(len(pending), 1))
-                    results[label] = _search_song_torrent(s["artist"], s["track"])
+                    results[label] = _search_song_torrent(s["artist"], s["track"],
+                                                          min_seeds=min_seeds)
                     if results[label].get("status") == "found":
-                        mag = _build_magnet(results[label].get("info_hash", ""),
-                                            results[label].get("name", ""))
-                        subprocess.Popen(["open", mag])
+                        _download_and_record(s["artist"], s["track"], results[label])
                     if idx % 5 == 0:
                         _spotify_save_results(results)
                     time.sleep(1.0)
@@ -966,11 +1061,14 @@ def page_musica():
                 cache_key  = f"{s['artist']} — {s['track']}"
                 res        = results.get(cache_key, {})
                 status     = res.get("status")
-                downloaded = _is_downloaded(lib_keys, s["artist"], s["track"])
+                downloaded = _is_downloaded(lib_keys, s["artist"], s["track"], ledger)
+                requested  = (not downloaded and
+                              _ledger_status(ledger, s["artist"], s["track"]) == "requested")
                 with st.container(border=True):
                     ci, cs, ca = st.columns([4, 2, 2])
                     with ci:
-                        badge = " &nbsp;⬇️ **En biblioteca**" if downloaded else ""
+                        badge = (" &nbsp;⬇️ **En biblioteca**" if downloaded else
+                                 " &nbsp;⬇️ *Pedida*" if requested else "")
                         st.markdown(f"**{i+1}. {s['artist']}** — {s['track']}{badge}",
                                     unsafe_allow_html=True)
                         st.caption(f"🎵 {s.get('genre','')}")
@@ -982,29 +1080,31 @@ def page_musica():
                             seeds = res.get("seeds", 0)
                             ic = "🟢" if seeds >= 20 else ("🟡" if seeds >= 5 else "🔴")
                             st.caption(f"✅ {res.get('name','')[:50]}")
+                            warn = " · ⚠️ pocos seeds" if res.get("low_seeds") else ""
                             st.caption(f"{ic} {seeds} seeds · {res.get('size','?')}"
-                                       f" · {res.get('source','')}")
+                                       f" · {res.get('source','')}{warn}")
+                        elif requested:
+                            st.caption("⬇️ Pedida (bajando)")
                         elif status == "not_found":
                             st.caption("❌ Sin resultado")
                         else:
                             st.caption("⏳ Sin buscar")
                     with ca:
                         if status == "found" and not downloaded:
-                            mag = _build_magnet(res.get("info_hash", ""),
-                                                res.get("name", ""))
-                            _magnet_button("🧲 Abrir", mag)
+                            if st.button("🧲 Descargar", key=f"trend_dl_{i}",
+                                         use_container_width=True):
+                                _download_and_record(s["artist"], s["track"], res)
+                                st.rerun()
                         elif not downloaded:
                             if st.button("🔍 Buscar", key=f"trend_s_{i}",
                                          use_container_width=True):
                                 with st.spinner(f"Buscando {cache_key}…"):
                                     results[cache_key] = _search_song_torrent(
-                                        s["artist"], s["track"])
+                                        s["artist"], s["track"], min_seeds=min_seeds)
                                     _spotify_save_results(results)
                                     if results[cache_key].get("status") == "found":
-                                        mag = _build_magnet(
-                                            results[cache_key].get("info_hash", ""),
-                                            results[cache_key].get("name", ""))
-                                        subprocess.Popen(["open", mag])
+                                        _download_and_record(s["artist"], s["track"],
+                                                             results[cache_key])
                                 st.rerun()
 
     with tab1:
@@ -2187,12 +2287,17 @@ def page_spotify():
             else:
                 canciones = json.loads(canciones_path.read_text(encoding="utf-8"))
                 results   = _spotify_load_results()
+                ledger    = _ledger_load()
+                min_seeds = int(cfg.get("min_seeds", 3))
 
-                # ── Biblioteca local (marcar descargadas) ─────────────────────
+                # ── Biblioteca local + ledger (marcar descargadas) ────────────
                 music_folder = cfg.get("music_folder", "")
                 lib_keys     = _scan_music_library(music_folder)
                 dl_set       = {f"{c['artist']} — {c['track']}" for c in canciones
-                                if _is_downloaded(lib_keys, c["artist"], c["track"])}
+                                if _is_downloaded(lib_keys, c["artist"], c["track"], ledger)}
+                req_set      = {f"{c['artist']} — {c['track']}" for c in canciones
+                                if f"{c['artist']} — {c['track']}" not in dl_set
+                                and _ledger_status(ledger, c["artist"], c["track"]) == "requested"}
 
                 lib_col1, lib_col2 = st.columns([3, 1])
                 lib_col1.caption(
@@ -2251,11 +2356,10 @@ def page_spotify():
                         label = f"{c['artist']} — {c['track']}"
                         prog_text.text(f"Buscando {idx + 1}/{total_s}: {label}…")
                         prog_bar.progress((idx + 1) / total_s)
-                        results[label] = _search_song_torrent(c["artist"], c["track"])
+                        results[label] = _search_song_torrent(c["artist"], c["track"],
+                                                              min_seeds=min_seeds)
                         if results[label].get("status") == "found":
-                            ih  = results[label].get("info_hash", "")
-                            mag = _build_magnet(ih, results[label].get("name", ""))
-                            subprocess.Popen(["open", mag])
+                            _download_and_record(c["artist"], c["track"], results[label])
                         if idx % 5 == 0:
                             _spotify_save_results(results)
                         time.sleep(1.0)
@@ -2300,12 +2404,14 @@ def page_spotify():
                     status      = res.get("status")
                     plays       = c.get("plays", 0)
                     downloaded  = cache_key in dl_set
+                    requested   = cache_key in req_set
 
                     with st.container(border=True):
                         col_info, col_status, col_action = st.columns([4, 2, 2])
 
                         with col_info:
-                            dl_badge = " &nbsp;⬇️ **En biblioteca**" if downloaded else ""
+                            dl_badge = (" &nbsp;⬇️ **En biblioteca**" if downloaded else
+                                        " &nbsp;⬇️ *Pedida*" if requested else "")
                             st.markdown(f"**{c['artist']}** — {c['track']}{dl_badge}",
                                         unsafe_allow_html=True)
                             album = res.get("album", "")
@@ -2319,36 +2425,42 @@ def page_spotify():
                         with col_status:
                             if downloaded:
                                 st.caption("⬇️ Ya descargada")
-                            if status == "found":
+                            elif requested:
+                                st.caption("⬇️ Pedida (bajando)")
+                            if status == "found" and not downloaded:
                                 name_t = res.get("name", "")[:60]
                                 seeds  = res.get("seeds", 0)
                                 size   = res.get("size", "?")
                                 src    = res.get("source", "")
                                 seed_icon = "🟢" if seeds >= 20 else ("🟡" if seeds >= 5 else "🔴")
                                 st.caption(f"✅ {name_t}")
+                                warn = " · ⚠️ pocos seeds" if res.get("low_seeds") else ""
                                 src_tag = f" · {src}" if src else ""
-                                st.caption(f"{seed_icon} {seeds} seeds · {size}{src_tag}")
-                            elif status == "not_found":
+                                st.caption(f"{seed_icon} {seeds} seeds · {size}{src_tag}{warn}")
+                            elif status == "not_found" and not downloaded and not requested:
                                 st.caption("❌ Sin resultado")
-                            elif not downloaded:
+                            elif not downloaded and not requested:
                                 st.caption("⏳ Sin buscar")
 
                         with col_action:
-                            if status == "found":
-                                ih  = res.get("info_hash", "")
-                                mag = _build_magnet(ih, res.get("name", ""))
-                                _magnet_button("🧲 Abrir", mag)
+                            if downloaded:
+                                pass
+                            elif status == "found":
+                                if st.button("🧲 Descargar", key=f"spo_dl_{i}",
+                                             use_container_width=True):
+                                    _download_and_record(c["artist"], c["track"], res)
+                                    st.rerun()
                             else:
                                 btn_label = "🔄 Reintentar" if status == "not_found" else "🔍 Buscar"
                                 if st.button(btn_label, key=f"spo_search_{i}",
                                              use_container_width=True):
                                     with st.spinner(f"Buscando {c['artist']} — {c['track']}…"):
-                                        results[cache_key] = _search_song_torrent(c["artist"], c["track"])
+                                        results[cache_key] = _search_song_torrent(
+                                            c["artist"], c["track"], min_seeds=min_seeds)
                                         _spotify_save_results(results)
                                         if results[cache_key].get("status") == "found":
-                                            ih  = results[cache_key].get("info_hash", "")
-                                            mag = _build_magnet(ih, results[cache_key].get("name", ""))
-                                            subprocess.Popen(["open", mag])
+                                            _download_and_record(c["artist"], c["track"],
+                                                                 results[cache_key])
                                     st.rerun()
 
 
@@ -2388,13 +2500,69 @@ def page_phone():
         st.warning("⚠️ La carpeta no existe. Verifica la ruta en ⚙️ Configuración.")
 
     # ── Tabs ──────────────────────────────────────────────────────────────────
-    tab_run, tab_dups, tab_export = st.tabs([
+    tab_run, tab_dups, tab_export, tab_meta = st.tabs([
         "🧹 Limpiar duplicados",
         "🔁 Lista de duplicados",
         "📦 Exportar a carpeta",
+        "🏷️ Metadata & Portadas",
     ])
 
     script = BASE_DIR / "scripts" / "dedup_music.py"
+
+    # ════════════════════════════════════════════════════════════════════════
+    # Tab Metadata — arreglar tags y portada de la biblioteca (Componente 2)
+    # ════════════════════════════════════════════════════════════════════════
+    with tab_meta:
+        st.markdown("""
+        <div style="background:rgba(120,80,255,0.08);border:1px solid rgba(120,80,255,0.2);
+                    border-radius:12px;padding:16px 20px;margin-bottom:16px;">
+            <div style="color:#c4b5fd;font-weight:700;margin-bottom:6px;">¿Qué hace?</div>
+            <div style="color:#8888b0;font-size:0.9rem;line-height:1.6;">
+                Escanea tu carpeta de música y, en los archivos con
+                <strong style="color:#e2e2f0;">tags incompletos o sin portada</strong>,
+                escribe artista/título/álbum/año/género y embebe la carátula usando
+                <strong style="color:#e2e2f0;">Shazam</strong>. También marca como
+                descargadas las canciones que pediste desde mediahub. No mueve ni borra
+                archivos. Formatos: MP3, FLAC, M4A.
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        tag_script = BASE_DIR / "scripts" / "tag_music.py"
+        col_md1, col_md2 = st.columns(2)
+        with col_md1:
+            if st.button("🔍 Analizar (sin escribir)", use_container_width=True,
+                         key="meta_dry"):
+                if not source_path.exists():
+                    st.error("La carpeta no existe.")
+                else:
+                    cfg["music_folder"] = source_folder
+                    save_config(cfg)
+                    status, log = st.empty(), st.empty()
+                    status.info("🔍 Analizando metadata...")
+                    cmd = [PYTHON, "-u", str(tag_script), source_folder, "--dry-run"]
+                    ok = stream_script(cmd, log, status)
+                    status.success("✅ Análisis listo.") if ok else status.error("❌ Error")
+        with col_md2:
+            confirm_meta = st.checkbox("✅ Confirmo escribir tags/portadas en mis archivos",
+                                       key="meta_confirm")
+            if st.button("🏷️ Arreglar metadata", type="primary",
+                         use_container_width=True, disabled=not confirm_meta,
+                         key="meta_run"):
+                if not source_path.exists():
+                    st.error("La carpeta no existe.")
+                else:
+                    cfg["music_folder"] = source_folder
+                    save_config(cfg)
+                    status, log = st.empty(), st.empty()
+                    status.warning("🏷️ Escribiendo tags y portadas...")
+                    cmd = [PYTHON, "-u", str(tag_script), source_folder]
+                    ok = stream_script(cmd, log, status)
+                    if ok:
+                        status.success("✅ ¡Metadata arreglada!")
+                        _scan_music_library.clear()
+                    else:
+                        status.error("❌ Terminó con errores")
 
     # ════════════════════════════════════════════════════════════════════════
     # Tab 1 — Borrar duplicados en lugar
@@ -3008,6 +3176,11 @@ def page_config():
 
     st.markdown("### 🎵 Preferencias de música")
     top_tracks = st.slider("Canciones top a buscar", 10, 300, cfg["top_tracks"], 10)
+    min_seeds  = st.slider(
+        "Seeds mínimos para un torrent sano", 0, 30, int(cfg.get("min_seeds", 3)),
+        help="Las búsquedas descartan torrents por debajo de este número de seeds "
+             "(los que abren pero no completan). Si ninguno llega, se marca ⚠️ pocos seeds.",
+    )
 
     genres_all = [
         "rock", "pop", "electronic", "hip-hop", "jazz", "metal",
@@ -3034,6 +3207,7 @@ def page_config():
             "phone_limit_gb":    phone_limit_gb,
             "top_tracks":     top_tracks,
             "top_books":      top_books,
+            "min_seeds":      min_seeds,
             "genres":         genres,
         }
         save_config(new_cfg)
