@@ -2,3 +2,6 @@ streamlit>=1.30.0
 mutagen>=1.47.0
 requests>=2.31.0
 pandas>=2.0.0
+
+# Función "YouTube → MP3" (binarios de sistema, instalar con brew):
+#   brew install yt-dlp ffmpeg

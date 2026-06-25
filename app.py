@@ -639,6 +639,43 @@ def _apple_top_songs(country: str, genre_id: int, limit: int = 50) -> list:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# YouTube → MP3 (vía yt-dlp + ffmpeg)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _youtube_deps_ok() -> bool:
+    from shutil import which
+    return which("yt-dlp") is not None and which("ffmpeg") is not None
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _youtube_search(query: str, n: int = 8) -> list:
+    """Busca en YouTube vía yt-dlp. Devuelve [{id, title, uploader, duration}]."""
+    script = BASE_DIR / "scripts" / "youtube_dl.py"
+    try:
+        out = subprocess.run(
+            [PYTHON, str(script), "search", query, str(n)],
+            capture_output=True, text=True, timeout=40,
+        ).stdout
+    except Exception:
+        return []
+    results = []
+    for line in out.splitlines():
+        try:
+            results.append(json.loads(line))
+        except Exception:
+            continue
+    return results
+
+
+def _fmt_duration(seconds) -> str:
+    try:
+        s = int(seconds)
+        return f"{s // 60}:{s % 60:02d}"
+    except Exception:
+        return "?"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Utilidades UI
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -985,10 +1022,77 @@ def page_musica():
 
     st.markdown("---")
 
-    tab1, tab2, tab_trend, tab3 = st.tabs([
+    tab1, tab2, tab_trend, tab_yt, tab3 = st.tabs([
         "▶ Ejecutar búsqueda", "🔎 Buscar artista / canción",
-        "🔥 Tendencias", "📂 Resultados anteriores",
+        "🔥 Tendencias", "🎬 YouTube → MP3", "📂 Resultados anteriores",
     ])
+
+    # ── Tab YouTube → MP3 ─────────────────────────────────────────────────────
+    with tab_yt:
+        st.markdown(
+            "Busca una canción en **YouTube** y descárgala como **MP3** directo a tu "
+            "biblioteca, con metadata y portada aplicadas automáticamente (vía Shazam)."
+        )
+        yt_script = BASE_DIR / "scripts" / "youtube_dl.py"
+        if not _youtube_deps_ok():
+            st.warning(
+                "Faltan dependencias. Instálalas en una terminal con:\n\n"
+                "`brew install yt-dlp ffmpeg`\n\n"
+                "Luego recarga esta página."
+            )
+        else:
+            yt_dest = st.text_input("📁 Carpeta destino", value=cfg.get("music_folder", ""),
+                                    key="yt_dest")
+            yc1, yc2 = st.columns([4, 1])
+            with yc1:
+                yt_query = st.text_input("Buscar canción en YouTube",
+                                         placeholder="ej: Soda Stereo De Música Ligera",
+                                         key="yt_query", label_visibility="collapsed")
+            with yc2:
+                yt_btn = st.button("🔍 Buscar", use_container_width=True,
+                                   key="yt_search_btn", disabled=not yt_query)
+
+            if yt_btn and yt_query:
+                st.session_state["yt_results"] = _youtube_search(yt_query, 8)
+
+            yt_results = st.session_state.get("yt_results", [])
+            if yt_btn and not yt_results:
+                st.info("Sin resultados. Prueba con otra búsqueda.")
+
+            for j, r in enumerate(yt_results):
+                vid = r.get("id", "")
+                with st.container(border=True):
+                    rc_img, rc_info, rc_act = st.columns([1, 4, 2])
+                    with rc_img:
+                        if vid:
+                            st.image(f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg",
+                                     use_container_width=True)
+                    with rc_info:
+                        st.markdown(f"**{r.get('title','')[:80]}**")
+                        st.caption(f"📺 {r.get('uploader','')}  ·  "
+                                   f"⏱️ {_fmt_duration(r.get('duration'))}")
+                        po = st.session_state.setdefault("_yt_preview_open", set())
+                        if st.button("▶️ Ver", key=f"yt_prev_{j}"):
+                            po.symmetric_difference_update({vid})
+                        if vid in po:
+                            st.video(f"https://www.youtube.com/watch?v={vid}")
+                    with rc_act:
+                        if st.button("⬇️ Descargar MP3", key=f"yt_dl_{j}",
+                                     type="primary", use_container_width=True):
+                            if not yt_dest or not Path(yt_dest).parent.exists():
+                                st.error("Carpeta destino inválida.")
+                            else:
+                                status, log = st.empty(), st.empty()
+                                status.info("⬇️ Descargando y convirtiendo a MP3…")
+                                cmd = [PYTHON, "-u", str(yt_script), "download",
+                                       f"https://www.youtube.com/watch?v={vid}",
+                                       "--dest", yt_dest]
+                                ok = stream_script(cmd, log, status)
+                                if ok:
+                                    status.success("✅ ¡Descargada como MP3!")
+                                    _scan_music_library.clear()
+                                else:
+                                    status.error("❌ Error al descargar")
 
     # ── Tab Tendencias: top de canciones de Apple Music + descarga ────────────
     with tab_trend:
