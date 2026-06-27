@@ -10,6 +10,9 @@ import sys
 import json
 import os
 import time
+import threading
+import functools
+import concurrent.futures as _cf
 from pathlib import Path
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -131,6 +134,7 @@ def _spotify_save_results(data: dict):
 # ─────────────────────────────────────────────────────────────────────────────
 
 SHAZAM_CACHE_FILE = BASE_DIR / "output" / "shazam_cache.json"
+_shazam_lock = threading.Lock()   # protege el caché en búsquedas concurrentes
 
 
 def _shazam_cache_load() -> dict:
@@ -153,9 +157,9 @@ def _shazam_lookup(artist: str, track: str) -> dict:
     """Devuelve {album, genre, year, artist, track, preview, artwork} desde
     Shazam (catálogo Apple Music), o {} si falla. Cacheado a disco.
     `preview` es un MP3/M4A de 30s reproducible; `artwork` una miniatura."""
-    cache = _shazam_cache_load()
     key = f"{artist} — {track}"
-    cached = cache.get(key)
+    with _shazam_lock:
+        cached = _shazam_cache_load().get(key)
     # Reutiliza la caché salvo entradas antiguas sin el campo `preview` (migración)
     if cached is not None and (cached == {} or "preview" in cached):
         return cached
@@ -183,8 +187,10 @@ def _shazam_lookup(artist: str, track: str) -> dict:
             }
     except Exception:
         out = {}
-    cache[key] = out
-    _shazam_cache_save(cache)
+    with _shazam_lock:
+        cache = _shazam_cache_load()
+        cache[key] = out
+        _shazam_cache_save(cache)
     return out
 
 
@@ -392,25 +398,45 @@ def _song_result_found(best: dict, q: str, extra: dict) -> dict:
     }
 
 
+def _parallel_searches(items: list, min_seeds: int = 3, max_workers: int = 6):
+    """Lanza _search_song_torrent en paralelo (pool acotado) para una lista de
+    items con 'artist'/'track' y va devolviendo (item, result) conforme terminan.
+    La red corre en hilos; el consumidor (hilo principal) hace los st.* y
+    escrituras de archivos. La concurrencia acotada hace de límite de cortesía."""
+    with _cf.ThreadPoolExecutor(max_workers=max_workers) as ex:
+        fut_map = {
+            ex.submit(_search_song_torrent, it["artist"], it["track"], True, min_seeds): it
+            for it in items
+        }
+        for fut in _cf.as_completed(fut_map):
+            it = fut_map[fut]
+            try:
+                res = fut.result()
+            except Exception:
+                res = {"status": "not_found", "searched_at": time.strftime("%Y-%m-%d %H:%M")}
+            yield it, res
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Búsqueda TPB cacheada a nivel módulo  (feature #11)
 # ─────────────────────────────────────────────────────────────────────────────
 
 import urllib.request as _ureq_mod, urllib.parse as _uparse_mod
 
-@st.cache_data(ttl=600, show_spinner=False)
-def _tpb_search_cached(q: str, cat: int, n: int) -> list:
-    """TPB search with 10-minute cache."""
+@functools.lru_cache(maxsize=512)
+def _tpb_search_cached(q: str, cat: int, n: int) -> tuple:
+    """TPB search, cacheado por args (lru_cache). Thread-safe — usable desde
+    hilos del pool de descargas (no usa st.cache_data, que requiere contexto)."""
     url = "https://apibay.org/q.php?" + _uparse_mod.urlencode({"q": q, "cat": cat})
     try:
         req = _ureq_mod.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         with _ureq_mod.urlopen(req, timeout=10) as r:
             data = json.loads(r.read().decode())
         if data and data[0].get("id") == "0":
-            return []
-        return data[:n]
+            return ()
+        return tuple(data[:n])
     except Exception:
-        return []
+        return ()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1145,17 +1171,18 @@ def page_musica():
                            if not _is_downloaded(lib_keys, s["artist"], s["track"], ledger)]
                 prog = st.progress(0.0)
                 ptxt = st.empty()
-                for idx, s in enumerate(pending):
+                total_p = max(len(pending), 1)
+                done = 0
+                for s, res in _parallel_searches(pending, min_seeds=min_seeds):
                     label = f"{s['artist']} — {s['track']}"
-                    ptxt.text(f"Buscando {idx+1}/{len(pending)}: {label}…")
-                    prog.progress((idx + 1) / max(len(pending), 1))
-                    results[label] = _search_song_torrent(s["artist"], s["track"],
-                                                          min_seeds=min_seeds)
-                    if results[label].get("status") == "found":
-                        _download_and_record(s["artist"], s["track"], results[label])
-                    if idx % 5 == 0:
+                    results[label] = res
+                    if res.get("status") == "found":
+                        _download_and_record(s["artist"], s["track"], res)
+                    done += 1
+                    prog.progress(done / total_p)
+                    ptxt.text(f"Buscando {done}/{len(pending)}: {label}…")
+                    if done % 10 == 0:
                         _spotify_save_results(results)
-                    time.sleep(1.0)
                 _spotify_save_results(results)
                 ptxt.success(f"✅ Listo — {len(pending)} canciones procesadas.")
                 st.rerun()
@@ -2456,17 +2483,17 @@ def page_spotify():
                     prog_bar  = st.progress(0.0)
                     prog_text = st.empty()
                     total_s   = len(to_search)
-                    for idx, c in enumerate(to_search):
+                    done = 0
+                    for c, res in _parallel_searches(to_search, min_seeds=min_seeds):
                         label = f"{c['artist']} — {c['track']}"
-                        prog_text.text(f"Buscando {idx + 1}/{total_s}: {label}…")
-                        prog_bar.progress((idx + 1) / total_s)
-                        results[label] = _search_song_torrent(c["artist"], c["track"],
-                                                              min_seeds=min_seeds)
-                        if results[label].get("status") == "found":
-                            _download_and_record(c["artist"], c["track"], results[label])
-                        if idx % 5 == 0:
+                        results[label] = res
+                        if res.get("status") == "found":
+                            _download_and_record(c["artist"], c["track"], res)
+                        done += 1
+                        prog_bar.progress(done / total_s)
+                        prog_text.text(f"Buscando {done}/{total_s}: {label}…")
+                        if done % 10 == 0:
                             _spotify_save_results(results)
-                        time.sleep(1.0)
                     _spotify_save_results(results)
                     prog_text.success(f"✅ Listo — {total_s} canciones buscadas.")
                     st.rerun()
