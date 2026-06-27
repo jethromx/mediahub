@@ -6755,6 +6755,71 @@ hr {
 </style>
 """, unsafe_allow_html=True)
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Página YouTube — pega un URL y elige cómo descargarlo (música/película)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def page_youtube():
+    _page_header("🎬", "YouTube", "Pega un enlace y descárgalo como MP3 o MP4")
+    cfg = load_config()
+
+    if not _youtube_deps_ok():
+        st.warning("Faltan dependencias. Instálalas con `brew install yt-dlp ffmpeg` "
+                   "y recarga la página.")
+        return
+
+    yt_script = BASE_DIR / "scripts" / "youtube_dl.py"
+
+    url  = st.text_input("URL de YouTube",
+                         placeholder="https://www.youtube.com/watch?v=…",
+                         key="ytu_url")
+    tipo = st.selectbox("¿Qué quieres descargar?",
+                        ["🎵 Música (MP3)", "🎬 Película / Video (MP4)"],
+                        key="ytu_tipo")
+    is_music = tipo.startswith("🎵")
+
+    quality_map = {"720p": 720, "1080p": 1080, "Máxima disponible": 0}
+    if is_music:
+        dest = st.text_input("📁 Carpeta destino", value=cfg.get("music_folder", ""),
+                             key="ytu_dest_m")
+        st.caption("Se descarga como **MP3 192k** y se le aplican metadata + portada (Shazam).")
+        quality = "1080p"
+    else:
+        dest = st.text_input("📁 Carpeta destino", value=cfg.get("movies_folder", ""),
+                             key="ytu_dest_v")
+        quality = st.selectbox("Calidad", list(quality_map.keys()), index=1,
+                               key="ytu_quality")
+        st.caption("Se descarga como **MP4 (H.264)**. El contenido de pago/DRM "
+                   "(YouTube Movies) no se puede descargar.")
+
+    valid = url.strip().startswith("http")
+    if valid:
+        with st.expander("▶️ Previsualizar"):
+            st.video(url.strip())
+
+    if st.button("⬇️ Descargar", type="primary", disabled=not valid,
+                 use_container_width=True, key="ytu_dl"):
+        if not dest or not Path(dest).parent.exists():
+            st.error("Carpeta destino inválida.")
+        else:
+            status, log = st.empty(), st.empty()
+            if is_music:
+                status.info("⬇️ Descargando música y convirtiendo a MP3…")
+                cmd = [PYTHON, "-u", str(yt_script), "download", url.strip(),
+                       "--dest", dest]
+            else:
+                status.info("⬇️ Descargando video… (puede tardar según tamaño)")
+                cmd = [PYTHON, "-u", str(yt_script), "video", url.strip(),
+                       "--dest", dest, "--max-height", str(quality_map[quality])]
+            ok = stream_script(cmd, log, status)
+            if ok:
+                status.success("✅ ¡Descargado!")
+                _scan_music_library.clear()
+            else:
+                status.error("❌ Error (¿URL inválido o contenido con DRM/pago?)")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Navegación sidebar — agrupada por categoría
 # ─────────────────────────────────────────────────────────────────────────────
@@ -6770,7 +6835,8 @@ NAV_GROUPS = [
     },
     {
         "label": "📥  DESCARGA",
-        "pages": ["🎵 Música", "🎬 Películas", "📚 Ebooks", "🟢 Mi Spotify", "🎮 ROMs"],
+        "pages": ["🎵 Música", "🎬 Películas", "📚 Ebooks", "🟢 Mi Spotify",
+                  "🎬 YouTube", "🎮 ROMs"],
     },
     {
         "label": "🗂  BIBLIOTECA",
@@ -6789,6 +6855,7 @@ PAGE_MAP = {
     "🎬 Películas":          page_peliculas,
     "📚 Ebooks":             page_ebooks,
     "🟢 Mi Spotify":         page_spotify,
+    "🎬 YouTube":            page_youtube,
     "🎮 ROMs":               page_roms,
     "🔧 Fix Metadata":       page_metadata,
     "🧹 Limpiar duplicados": page_phone,
@@ -6806,6 +6873,7 @@ PAGE_HINTS = {
     "🎬 Películas":          "TMDB + TPB + YTS · Latino",
     "📚 Ebooks":             "Libros para Kindle",
     "🟢 Mi Spotify":         "Tu historial personal",
+    "🎬 YouTube":            "URL → MP3 (música) o MP4 (video)",
     "🎮 ROMs":               "Miyoo A30 · GBA · SNES · PS1",
     "🔧 Fix Metadata":       "Corrige tags ID3 de MP3s",
     "🧹 Limpiar duplicados": "Elimina MP3s repetidos",
