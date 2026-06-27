@@ -200,6 +200,46 @@ def download(url: str, dest: Path, artist_hint: str = "", track_hint: str = "",
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Descargar video (película/clip) → MP4
+# ─────────────────────────────────────────────────────────────────────────────
+
+def download_video(url: str, dest: Path, max_height: int = 1080) -> Path:
+    """Descarga el video como MP4 (bestvideo+bestaudio) en `dest`.
+    max_height=0 → máxima calidad disponible. No aplica tagging de música."""
+    if not deps_ok():
+        sys.exit("[!] Faltan dependencias. Instala con: brew install yt-dlp ffmpeg")
+    dest.mkdir(parents=True, exist_ok=True)
+    if not url.startswith("http"):
+        url = f"https://www.youtube.com/watch?v={url}"
+
+    # Prefiere H.264 (avc1) por compatibilidad (QuickTime no reproduce AV1),
+    # cayendo a cualquier mp4 y luego a lo mejor disponible.
+    if max_height:
+        h = f"[height<={max_height}]"
+        fmt = (f"bv*{h}[vcodec^=avc1]+ba[ext=m4a]/bv*{h}[ext=mp4]+ba/"
+               f"bv*{h}+ba/b{h}/b")
+    else:
+        fmt = "bv*[vcodec^=avc1]+ba[ext=m4a]/bv*[ext=mp4]+ba/bv*+ba/b"
+
+    out_tpl = str(dest / "%(title)s [%(id)s].%(ext)s")
+    print(f"⬇️  Descargando video ({'máx' if not max_height else str(max_height)+'p'}): {url}")
+    cmd = [
+        "yt-dlp", "-f", fmt, "--merge-output-format", "mp4",
+        "--no-playlist", "--no-warnings", "--newline",
+        "-o", out_tpl, url,
+    ]
+    proc = subprocess.run(cmd, text=True)
+    if proc.returncode != 0:
+        sys.exit("[!] yt-dlp falló al descargar el video (¿contenido con DRM/pago?).")
+
+    vids = sorted(dest.glob("*.mp4"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not vids:
+        sys.exit("[!] No se encontró el MP4 descargado.")
+    print(f"✅ Listo: {vids[0]}")
+    return vids[0]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # CLI
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -218,9 +258,17 @@ if __name__ == "__main__":
     p_dl.add_argument("--track", default="")
     p_dl.add_argument("--bitrate", default="192")
 
+    p_vid = sub.add_parser("video")
+    p_vid.add_argument("url")
+    p_vid.add_argument("--dest", type=Path, required=True)
+    p_vid.add_argument("--max-height", type=int, default=1080,
+                       help="Altura máxima (0 = máxima disponible)")
+
     args = parser.parse_args()
     if args.mode == "search":
         for r in search(args.query, args.n):
             print(json.dumps(r, ensure_ascii=False))
     elif args.mode == "download":
         download(args.url, args.dest, args.artist, args.track, args.bitrate)
+    elif args.mode == "video":
+        download_video(args.url, args.dest, args.max_height)

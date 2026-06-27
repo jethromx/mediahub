@@ -3558,11 +3558,13 @@ def page_peliculas():
     ]
 
     # ─── Tabs principales ─────────────────────────────────────────────────────
-    tab_top, tab_buscar, tab_decadas, tab_culto, tab_rename_mov, tab_resultados, tab_watchlist, tab_subs = st.tabs([
+    (tab_top, tab_buscar, tab_decadas, tab_culto, tab_yt, tab_rename_mov,
+     tab_resultados, tab_watchlist, tab_subs) = st.tabs([
         "📥 Top Descargas",
         "🔎 Buscar película",
         "📅 Explorar por época / género",
         "🎭 Cine de Culto",
+        "🎬 YouTube",
         "✏️ Renombrar archivos",
         "📂 Resultados guardados",
         "⭐ Watchlist",
@@ -3571,6 +3573,82 @@ def page_peliculas():
 
     movies_dir = BASE_DIR / "output" / "movies"
     movies_dir.mkdir(parents=True, exist_ok=True)
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # TAB YouTube — descargar video/película de YouTube como MP4
+    # ═══════════════════════════════════════════════════════════════════════════
+    with tab_yt:
+        st.markdown(
+            "Busca (o pega un enlace de) **YouTube** y descarga el video como **MP4** "
+            "a tu carpeta de películas."
+        )
+        st.caption("⚠️ Solo contenido de libre acceso. Las películas de pago/renta "
+                   "(YouTube Movies) o con DRM no se pueden descargar.")
+        yt_script = BASE_DIR / "scripts" / "youtube_dl.py"
+        if not _youtube_deps_ok():
+            st.warning("Faltan dependencias. Instala con `brew install yt-dlp ffmpeg` "
+                       "y recarga la página.")
+        else:
+            ytv_dest = st.text_input(
+                "📁 Carpeta destino",
+                value=cfg.get("movies_folder", str(Path.home() / "Downloads" / "Peliculas")),
+                key="ytv_dest")
+            quality_map = {"720p": 720, "1080p": 1080, "Máxima disponible": 0}
+            qc1, qc2 = st.columns([3, 1])
+            with qc1:
+                ytv_query = st.text_input(
+                    "Buscar en YouTube o pegar URL",
+                    placeholder="ej: nombre de la película  ·  o https://youtube.com/watch?v=…",
+                    key="ytv_query", label_visibility="collapsed")
+            with qc2:
+                ytv_quality = st.selectbox("Calidad", list(quality_map.keys()),
+                                           index=1, key="ytv_quality")
+
+            def _ytv_download(url):
+                if not ytv_dest or not Path(ytv_dest).parent.exists():
+                    st.error("Carpeta destino inválida.")
+                    return
+                status, log = st.empty(), st.empty()
+                status.info("⬇️ Descargando video… (puede tardar según tamaño)")
+                cmd = [PYTHON, "-u", str(yt_script), "video", url,
+                       "--dest", ytv_dest,
+                       "--max-height", str(quality_map[ytv_quality])]
+                ok = stream_script(cmd, log, status)
+                status.success("✅ ¡Video descargado!") if ok else \
+                    status.error("❌ Error (¿contenido con DRM/pago o no disponible?)")
+
+            is_url = ytv_query.strip().startswith("http")
+            cbtn1, cbtn2 = st.columns(2)
+            if is_url:
+                if cbtn1.button("⬇️ Descargar de este URL", type="primary",
+                                use_container_width=True, key="ytv_url_dl"):
+                    _ytv_download(ytv_query.strip())
+            else:
+                if cbtn1.button("🔍 Buscar", use_container_width=True,
+                                key="ytv_search", disabled=not ytv_query):
+                    st.session_state["ytv_results"] = _youtube_search(ytv_query, 8)
+
+            for j, r in enumerate(st.session_state.get("ytv_results", []) if not is_url else []):
+                vid = r.get("id", "")
+                with st.container(border=True):
+                    ri, rn, ra = st.columns([1, 4, 2])
+                    with ri:
+                        if vid:
+                            st.image(f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg",
+                                     use_container_width=True)
+                    with rn:
+                        st.markdown(f"**{r.get('title','')[:80]}**")
+                        st.caption(f"📺 {r.get('uploader','')}  ·  "
+                                   f"⏱️ {_fmt_duration(r.get('duration'))}")
+                        po = st.session_state.setdefault("_ytv_preview_open", set())
+                        if st.button("▶️ Ver", key=f"ytv_prev_{j}"):
+                            po.symmetric_difference_update({vid})
+                        if vid in po:
+                            st.video(f"https://www.youtube.com/watch?v={vid}")
+                    with ra:
+                        if st.button("⬇️ Descargar MP4", key=f"ytv_dl_{j}",
+                                     type="primary", use_container_width=True):
+                            _ytv_download(f"https://www.youtube.com/watch?v={vid}")
 
     # ═══════════════════════════════════════════════════════════════════════════
     # TAB 0 — Top Descargas (YTS)
