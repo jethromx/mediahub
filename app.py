@@ -40,6 +40,10 @@ DEFAULT_CONFIG = {
     "top_tracks":        100,
     "top_books":         120,
     "min_seeds":         3,
+    "qbit_url":          "",          # ej. http://localhost:8080
+    "qbit_user":         "admin",
+    "qbit_pass":         "",
+    "use_qbit":          False,       # enviar magnets a qBittorrent en vez de `open`
     "genres": [
         "rock", "pop", "electronic", "hip-hop", "jazz",
         "metal", "classical", "reggae", "latin", "blues",
@@ -305,10 +309,73 @@ def _ledger_status(ledger: dict, artist: str, track: str) -> str:
     return ledger.get(f"{artist} — {track}", {}).get("status", "") if ledger else ""
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Cliente qBittorrent (WebUI API v2) — opcional (F3)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _qbit_opener(cfg: dict):
+    """Devuelve un opener urllib autenticado contra qBittorrent, o None si no
+    hay URL configurada o el login falla."""
+    url = (cfg.get("qbit_url", "") or "").rstrip("/")
+    if not url:
+        return None
+    import http.cookiejar
+    cj = http.cookiejar.CookieJar()
+    opener = _ureq_mod.build_opener(_ureq_mod.HTTPCookieProcessor(cj))
+    data = _uparse_mod.urlencode({
+        "username": cfg.get("qbit_user", ""), "password": cfg.get("qbit_pass", ""),
+    }).encode()
+    try:
+        req = _ureq_mod.Request(f"{url}/api/v2/auth/login", data=data,
+                                headers={"Referer": url, "User-Agent": "mediahub"})
+        body = opener.open(req, timeout=8).read().decode().strip()
+        return opener if body == "Ok." else None
+    except Exception:
+        return None
+
+
+def _qbit_add_magnet(cfg: dict, magnet: str, savepath: str = "") -> bool:
+    opener = _qbit_opener(cfg)
+    if not opener:
+        return False
+    url = cfg["qbit_url"].rstrip("/")
+    fields = {"urls": magnet}
+    if savepath:
+        fields["savepath"] = savepath
+    try:
+        req = _ureq_mod.Request(f"{url}/api/v2/torrents/add",
+                                data=_uparse_mod.urlencode(fields).encode(),
+                                headers={"Referer": url})
+        opener.open(req, timeout=10).read()
+        return True
+    except Exception:
+        return False
+
+
+def _qbit_list(cfg: dict):
+    """Lista de torrents (dicts de la API) o None si no conecta."""
+    opener = _qbit_opener(cfg)
+    if not opener:
+        return None
+    url = cfg["qbit_url"].rstrip("/")
+    try:
+        req = _ureq_mod.Request(f"{url}/api/v2/torrents/info",
+                                headers={"Referer": url})
+        return json.loads(opener.open(req, timeout=8).read())
+    except Exception:
+        return None
+
+
 def _download_and_record(artist: str, track: str, result: dict) -> None:
-    """Abre el magnet en el cliente torrent del SO y registra la petición."""
+    """Envía el magnet a qBittorrent (si está configurado y activado) o lo abre
+    en el cliente del SO; en ambos casos registra la petición en el ledger."""
     mag = _build_magnet(result.get("info_hash", ""), result.get("name", ""))
-    subprocess.Popen(["open", mag])
+    cfg = load_config()
+    sent = False
+    if cfg.get("use_qbit") and cfg.get("qbit_url"):
+        sent = _qbit_add_magnet(cfg, mag, cfg.get("music_folder", ""))
+    if not sent:
+        subprocess.Popen(["open", mag])   # fallback al handler del SO
     _ledger_record_request(artist, track, result)
 
 
@@ -725,6 +792,92 @@ def _youtube_download_song(artist: str, track: str, dest: str) -> bool:
         return r.returncode == 0
     except Exception:
         return False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Salud de fuentes (F1) — pingea cada API y reporta estado/latencia
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _sources_health() -> dict:
+    """Pingea cada fuente (en paralelo) con una consulta mínima y devuelve
+    {nombre: {ok, ms, detail}}. Usa pings independientes del caché de la app."""
+    cfg = load_config()
+
+    def _ck_knaben():
+        r = _knaben_search_music("queen", 3)
+        return bool(r), f"{len(r)} resultados"
+
+    def _ck_solid():
+        r = _solid_search_music("queen", 3)
+        return bool(r), f"{len(r)} resultados"
+
+    def _ck_bits():
+        r = _bitsearch_search_music("queen", 3)
+        return bool(r), f"{len(r)} resultados"
+
+    def _ck_tpb():
+        r = _tpb_search_cached("queen", 100, 3)
+        return bool(r), f"{len(r)} resultados"
+
+    def _ck_shazam():
+        m = _shazam_lookup("Queen", "Bohemian Rhapsody")
+        return bool(m.get("album")), (m.get("album") or "sin match")
+
+    def _ck_apple():
+        d = json.loads(_ureq_mod.urlopen(_ureq_mod.Request(
+            "https://itunes.apple.com/us/rss/topsongs/limit=3/json",
+            headers={"User-Agent": "Mozilla/5.0"}), timeout=10).read())
+        n = len(d.get("feed", {}).get("entry", []))
+        return n > 0, f"{n} en chart"
+
+    def _ck_youtube():
+        from shutil import which
+        if not (which("yt-dlp") and which("ffmpeg")):
+            return False, "falta yt-dlp/ffmpeg"
+        out = subprocess.run(["yt-dlp", "ytsearch1:test", "--flat-playlist",
+                              "--dump-json", "--no-warnings"],
+                             capture_output=True, text=True, timeout=25).stdout
+        return bool(out.strip()), "ok" if out.strip() else "sin respuesta"
+
+    def _ck_tmdb():
+        key = cfg.get("tmdb_api_key", "").strip()
+        if not key:
+            return None, "sin API key"
+        _ureq_mod.urlopen(_ureq_mod.Request(
+            f"https://api.themoviedb.org/3/configuration?api_key={key}",
+            headers={"User-Agent": "Mozilla/5.0"}), timeout=10).read()
+        return True, "ok"
+
+    def _ck_lastfm():
+        key = cfg.get("lastfm_api_key", "").strip()
+        if not key:
+            return None, "sin API key"
+        u = ("https://ws.audioscrobbler.com/2.0/?method=chart.gettoptracks"
+             f"&api_key={key}&format=json&limit=1")
+        _ureq_mod.urlopen(_ureq_mod.Request(u, headers={"User-Agent": "Mozilla/5.0"}),
+                          timeout=10).read()
+        return True, "ok"
+
+    checks = {
+        "Knaben": _ck_knaben, "SolidTorrents": _ck_solid, "BitSearch": _ck_bits,
+        "The Pirate Bay": _ck_tpb, "Shazam": _ck_shazam, "Apple Music": _ck_apple,
+        "YouTube (yt-dlp)": _ck_youtube, "TMDB": _ck_tmdb, "Last.fm": _ck_lastfm,
+    }
+
+    def _timed(fn):
+        t0 = time.time()
+        try:
+            ok, detail = fn()
+        except Exception as e:
+            ok, detail = False, str(e)[:80]
+        return {"ok": ok, "ms": int((time.time() - t0) * 1000), "detail": detail}
+
+    out = {}
+    with _cf.ThreadPoolExecutor(max_workers=len(checks)) as ex:
+        futs = {ex.submit(_timed, fn): name for name, fn in checks.items()}
+        for f in _cf.as_completed(futs):
+            out[futs[f]] = f.result()
+    return out
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1483,17 +1636,31 @@ def page_musica():
             queries_to_run = _expand_queries(effective_query) if expandir else [effective_query]
 
             tpb_res, knaben_res, solid_res, bits_res = [], [], [], []
-            with st.spinner(f"Buscando «{effective_query}»… ({len(queries_to_run)} variante(s))"):
-                for q_var in queries_to_run:
-                    if usar_tpb and len(tpb_res) < n_resultados:
-                        raw = _tpb_search_cached(q_var, cat_map[categoria], n_resultados)
-                        tpb_res += [{**r, "source": "TPB"} for r in raw]
-                    if usar_knaben and len(knaben_res) < n_resultados:
-                        knaben_res += _knaben_music(q_var, n_resultados)
-                    if usar_solid and len(solid_res) < n_resultados:
-                        solid_res += _solid_music(q_var, n_resultados)
-                    if usar_bitsearch and len(bits_res) < n_resultados:
-                        bits_res += _bitsearch_music(q_var, n_resultados)
+            buckets = {"tpb": tpb_res, "knaben": knaben_res,
+                       "solid": solid_res, "bits": bits_res}
+            # Una tarea por (variante × fuente); se ejecutan todas en paralelo
+            tasks = []
+            for q_var in queries_to_run:
+                if usar_tpb:
+                    tasks.append(("tpb", lambda q=q_var: [
+                        {**r, "source": "TPB"}
+                        for r in _tpb_search_cached(q, cat_map[categoria], n_resultados)]))
+                if usar_knaben:
+                    tasks.append(("knaben", lambda q=q_var: _knaben_music(q, n_resultados)))
+                if usar_solid:
+                    tasks.append(("solid", lambda q=q_var: _solid_music(q, n_resultados)))
+                if usar_bitsearch:
+                    tasks.append(("bits", lambda q=q_var: _bitsearch_music(q, n_resultados)))
+
+            with st.spinner(f"Buscando «{effective_query}»… "
+                            f"({len(queries_to_run)} variante(s), {len(tasks)} consultas)"):
+                with _cf.ThreadPoolExecutor(max_workers=min(len(tasks) or 1, 8)) as ex:
+                    futs = {ex.submit(fn): name for name, fn in tasks}
+                    for f in _cf.as_completed(futs):
+                        try:
+                            buckets[futs[f]] += f.result()
+                        except Exception:
+                            pass
 
             # Deduplicar por info_hash, ordenar por seeds
             seen, resultados = set(), []
@@ -2748,14 +2915,39 @@ def page_phone():
         st.warning("⚠️ La carpeta no existe. Verifica la ruta en ⚙️ Configuración.")
 
     # ── Tabs ──────────────────────────────────────────────────────────────────
-    tab_run, tab_dups, tab_export, tab_meta = st.tabs([
+    tab_run, tab_dups, tab_export, tab_meta, tab_m3u = st.tabs([
         "🧹 Limpiar duplicados",
         "🔁 Lista de duplicados",
         "📦 Exportar a carpeta",
         "🏷️ Metadata & Portadas",
+        "🎼 Playlist .m3u",
     ])
 
     script = BASE_DIR / "scripts" / "dedup_music.py"
+
+    # ════════════════════════════════════════════════════════════════════════
+    # Tab Playlist — exportar .m3u8 de la biblioteca (F4)
+    # ════════════════════════════════════════════════════════════════════════
+    with tab_m3u:
+        st.markdown("Genera una **playlist `.m3u8`** con toda tu música — "
+                    "compatible con VLC, reproductores y tu móvil.")
+        if st.button("🎼 Generar playlist", type="primary", key="m3u_gen"):
+            if not source_path.exists():
+                st.error("La carpeta no existe.")
+            else:
+                status, log = st.empty(), st.empty()
+                status.info("🎼 Generando playlist…")
+                out = source_path / "playlist.m3u8"
+                cmd = [PYTHON, "-u", str(BASE_DIR / "scripts" / "export_m3u.py"),
+                       source_folder, "--out", str(out)]
+                ok = stream_script(cmd, log, status)
+                if ok and out.exists():
+                    status.success(f"✅ Playlist generada: {out}")
+                    st.download_button("⬇️ Descargar playlist.m3u8",
+                                       data=out.read_bytes(),
+                                       file_name="playlist.m3u8", mime="audio/x-mpegurl")
+                else:
+                    status.error("❌ Error al generar la playlist")
 
     # ════════════════════════════════════════════════════════════════════════
     # Tab Metadata — arreglar tags y portada de la biblioteca (Componente 2)
@@ -3440,10 +3632,27 @@ def page_config():
     st.markdown("### 📚 Preferencias de ebooks")
     top_books = st.slider("Libros a buscar", 20, 300, cfg["top_books"], 10)
 
+    st.markdown("### 🧲 qBittorrent (opcional)")
+    st.caption("Si lo configuras, los magnets se envían a qBittorrent vía su WebUI "
+               "(Ajustes → Web UI) en vez de abrirse en el cliente del SO.")
+    qbit_url  = st.text_input("URL WebUI", value=cfg.get("qbit_url", ""),
+                              placeholder="http://localhost:8080")
+    qcol1, qcol2 = st.columns(2)
+    with qcol1:
+        qbit_user = st.text_input("Usuario", value=cfg.get("qbit_user", "admin"))
+    with qcol2:
+        qbit_pass = st.text_input("Contraseña", value=cfg.get("qbit_pass", ""),
+                                  type="password")
+    use_qbit = st.toggle("Enviar magnets a qBittorrent", value=cfg.get("use_qbit", False))
+
     st.markdown("---")
     if st.button("💾 Guardar configuración", type="primary"):
         new_cfg = {
             **cfg,
+            "qbit_url":  qbit_url.strip(),
+            "qbit_user": qbit_user.strip(),
+            "qbit_pass": qbit_pass,
+            "use_qbit":  use_qbit,
             "lastfm_api_key": lastfm_key,
             "tmdb_api_key":   tmdb_key,
             "opensubtitles_api_key": opensubs_key,
@@ -6964,6 +7173,79 @@ def page_youtube():
                 status.error("❌ Error (¿URL inválido o contenido con DRM/pago?)")
 
 
+def page_torrents():
+    _page_header("🧲", "Torrents", "Descargas activas en qBittorrent")
+    cfg = load_config()
+    if not cfg.get("qbit_url"):
+        st.info("Configura qBittorrent en **⚙️ Configuración** para ver y enviar "
+                "tus descargas aquí.")
+        return
+
+    st.button("🔄 Actualizar")  # un clic = rerun = lista fresca
+    torrents = _qbit_list(cfg)
+    if torrents is None:
+        st.error(f"No se pudo conectar a qBittorrent en `{cfg['qbit_url']}`. "
+                 "Revisa URL/usuario/contraseña y que la WebUI esté activa "
+                 "(Ajustes → Web UI).")
+        return
+    if not torrents:
+        st.info("No hay torrents en qBittorrent ahora mismo.")
+        return
+
+    def _eta(s):
+        try:
+            s = int(s)
+            return "∞" if s >= 8640000 else f"{s//3600}h{(s%3600)//60:02d}m" if s >= 3600 \
+                else f"{s//60}m{s%60:02d}s"
+        except Exception:
+            return "?"
+
+    active = sum(1 for t in torrents if 0 < t.get("progress", 0) < 1)
+    done   = sum(1 for t in torrents if t.get("progress", 0) >= 1)
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Total", len(torrents))
+    m2.metric("⬇️ Descargando", active)
+    m3.metric("✅ Completos", done)
+    st.markdown("---")
+
+    for t in sorted(torrents, key=lambda x: x.get("progress", 0)):
+        prog = max(0.0, min(float(t.get("progress", 0)), 1.0))
+        with st.container(border=True):
+            st.markdown(f"**{t.get('name', '')[:75]}**")
+            st.progress(prog)
+            st.caption(f"{prog*100:.0f}% · {t.get('state','')} · "
+                       f"⬇️ {_size_human(t.get('dlspeed', 0))}/s · "
+                       f"ETA {_eta(t.get('eta', 0))} · {_size_human(t.get('size', 0))}")
+
+
+def page_health():
+    _page_header("🩺", "Salud de fuentes", "Estado de cada API que usa la app")
+    st.caption("Pingea cada fuente con una consulta mínima. Útil para detectar "
+               "cuándo una API cambia o deja de responder.")
+
+    if st.button("🔄 Verificar ahora", type="primary") or "health" not in st.session_state:
+        with st.spinner("Verificando fuentes…"):
+            st.session_state["health"] = _sources_health()
+
+    health = st.session_state.get("health", {})
+    n_ok   = sum(1 for v in health.values() if v["ok"] is True)
+    n_bad  = sum(1 for v in health.values() if v["ok"] is False)
+    n_na   = sum(1 for v in health.values() if v["ok"] is None)
+    m1, m2, m3 = st.columns(3)
+    m1.metric("🟢 OK", n_ok)
+    m2.metric("🔴 Caídas", n_bad)
+    m3.metric("⚪ Sin configurar", n_na)
+    st.markdown("---")
+
+    for name, v in sorted(health.items(), key=lambda kv: (kv[1]["ok"] is not False)):
+        icon = "🟢" if v["ok"] is True else ("🔴" if v["ok"] is False else "⚪")
+        with st.container(border=True):
+            c1, c2, c3 = st.columns([3, 2, 3])
+            c1.markdown(f"{icon} **{name}**")
+            c2.caption(f"⏱️ {v['ms']} ms")
+            c3.caption(v["detail"])
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Navegación sidebar — agrupada por categoría
 # ─────────────────────────────────────────────────────────────────────────────
@@ -6980,7 +7262,7 @@ NAV_GROUPS = [
     {
         "label": "📥  DESCARGA",
         "pages": ["🎵 Música", "🎬 Películas", "📚 Ebooks", "🟢 Mi Spotify",
-                  "🎬 YouTube", "🎮 ROMs"],
+                  "🎬 YouTube", "🧲 Torrents", "🎮 ROMs"],
     },
     {
         "label": "🗂  BIBLIOTECA",
@@ -6988,7 +7270,8 @@ NAV_GROUPS = [
     },
     {
         "label": "⚙  SISTEMA",
-        "pages": ["⚙️ Configuración", "📋 Historial", "📈 Estadísticas", "📖 Ayuda"],
+        "pages": ["⚙️ Configuración", "🩺 Salud de fuentes", "📋 Historial",
+                  "📈 Estadísticas", "📖 Ayuda"],
     },
 ]
 
@@ -7000,11 +7283,13 @@ PAGE_MAP = {
     "📚 Ebooks":             page_ebooks,
     "🟢 Mi Spotify":         page_spotify,
     "🎬 YouTube":            page_youtube,
+    "🧲 Torrents":           page_torrents,
     "🎮 ROMs":               page_roms,
     "🔧 Fix Metadata":       page_metadata,
     "🧹 Limpiar duplicados": page_phone,
     "📊 Explorador":         page_explorador,
     "⚙️ Configuración":      page_config,
+    "🩺 Salud de fuentes":   page_health,
     "📋 Historial":          page_historial,
     "📈 Estadísticas":       page_estadisticas,
     "📖 Ayuda":              page_ayuda,
@@ -7018,11 +7303,13 @@ PAGE_HINTS = {
     "📚 Ebooks":             "Libros para Kindle",
     "🟢 Mi Spotify":         "Tu historial personal",
     "🎬 YouTube":            "URL → MP3 (música) o MP4 (video)",
+    "🧲 Torrents":           "Progreso de qBittorrent",
     "🎮 ROMs":               "Miyoo A30 · GBA · SNES · PS1",
     "🔧 Fix Metadata":       "Corrige tags ID3 de MP3s",
     "🧹 Limpiar duplicados": "Elimina MP3s repetidos",
     "📊 Explorador":         "Espacio por carpeta",
     "⚙️ Configuración":      "API keys y rutas",
+    "🩺 Salud de fuentes":   "Estado de las APIs",
     "📋 Historial":          "Registro de todas las descargas",
     "📈 Estadísticas":       "Métricas de biblioteca y actividad",
     "📖 Ayuda":              "Documentación",
