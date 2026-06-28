@@ -701,6 +701,25 @@ def _fmt_duration(seconds) -> str:
         return "?"
 
 
+def _youtube_download_song(artist: str, track: str, dest: str) -> bool:
+    """Busca la canción en YouTube (top 1) y la descarga como MP3 en `dest`,
+    con metadata + portada (vía youtube_dl/tag_music). True si tuvo éxito."""
+    hits = _youtube_search(f"{artist} {track}", 1)
+    vid = hits[0].get("id", "") if hits else ""
+    if not vid:
+        return False
+    script = BASE_DIR / "scripts" / "youtube_dl.py"
+    try:
+        r = subprocess.run(
+            [PYTHON, str(script), "download", vid, "--dest", dest,
+             "--artist", artist, "--track", track],
+            capture_output=True, text=True, timeout=300,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Utilidades UI
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2394,7 +2413,83 @@ def page_spotify():
             data_dir.mkdir(exist_ok=True)
             st.success(f"Carpeta creada: {data_dir}")
     else:
-        tab1, tab2, tab3 = st.tabs(["▶ Ejecutar", "📂 Resultados", "🎵 Canciones"])
+        tab1, tab2, tab3, tab_yt = st.tabs(
+            ["▶ Ejecutar", "📂 Resultados", "🎵 Canciones", "🎬 YouTube"])
+
+        # ── Tab YouTube: descargar tu lista de Spotify desde YouTube ──────────
+        with tab_yt:
+            canciones_path = BASE_DIR / "output" / "top_canciones.json"
+            if not canciones_path.exists():
+                st.info("Primero ejecuta el análisis en **▶ Ejecutar** para generar "
+                        "el listado de canciones.")
+            elif not _youtube_deps_ok():
+                st.warning("Faltan dependencias. Instala con `brew install yt-dlp ffmpeg` "
+                           "y recarga la página.")
+            else:
+                st.markdown("Descarga tu lista de Spotify directamente desde "
+                            "**YouTube** como MP3 (con metadata + portada).")
+                canciones = json.loads(canciones_path.read_text(encoding="utf-8"))
+                yt_dest = st.text_input("📁 Carpeta destino",
+                                        value=cfg.get("music_folder", ""), key="spy_dest")
+                lib_keys = _scan_music_library(yt_dest)
+                ledger   = _ledger_load()
+                missing  = [c for c in canciones
+                            if not _is_downloaded(lib_keys, c["artist"], c["track"], ledger)]
+
+                m1, m2 = st.columns(2)
+                m1.metric("🎵 En tu lista", len(canciones))
+                m2.metric("📥 Faltan en biblioteca", len(missing))
+
+                cqa, cqb = st.columns([1, 2])
+                with cqa:
+                    lim = st.selectbox("Máximo a bajar", [10, 25, 50], key="spy_limit")
+                with cqb:
+                    st.write("")
+                    run_batch = st.button(f"🎬 Descargar faltantes (máx {lim})",
+                                          type="primary", disabled=not missing,
+                                          use_container_width=True, key="spy_batch")
+                if run_batch:
+                    batch = missing[:lim]
+                    prog, ptxt, okc = st.progress(0.0), st.empty(), 0
+                    for i, c in enumerate(batch):
+                        ptxt.text(f"Descargando {i+1}/{len(batch)}: "
+                                  f"{c['artist']} — {c['track']}…")
+                        if _youtube_download_song(c["artist"], c["track"], yt_dest):
+                            okc += 1
+                        prog.progress((i + 1) / len(batch))
+                    _scan_music_library.clear()
+                    ptxt.success(f"✅ Listo — {okc}/{len(batch)} descargadas.")
+                    st.rerun()
+
+                st.markdown("---")
+                MAX_ROWS = 100
+                shown = canciones[:MAX_ROWS]
+                if len(canciones) > MAX_ROWS:
+                    st.caption(f"Mostrando las primeras {MAX_ROWS} de {len(canciones)}.")
+                for i, c in enumerate(shown):
+                    downloaded = _is_downloaded(lib_keys, c["artist"], c["track"], ledger)
+                    with st.container(border=True):
+                        ci, ca = st.columns([5, 2])
+                        with ci:
+                            badge = " &nbsp;⬇️ **En biblioteca**" if downloaded else ""
+                            st.markdown(f"**{c['artist']}** — {c['track']}{badge}",
+                                        unsafe_allow_html=True)
+                            st.caption(f"🔁 {c.get('plays', 0)} plays")
+                            _song_preview_ui(c["artist"], c["track"], f"spy_{i}")
+                        with ca:
+                            if not downloaded:
+                                if st.button("🎬 Bajar MP3", key=f"spy_dl_{i}",
+                                             use_container_width=True):
+                                    with st.spinner(f"Descargando {c['artist']} — "
+                                                    f"{c['track']}…"):
+                                        ok = _youtube_download_song(
+                                            c["artist"], c["track"], yt_dest)
+                                    if ok:
+                                        _scan_music_library.clear()
+                                        st.rerun()
+                                    else:
+                                        st.error("❌ No encontrada en YouTube")
+
         with tab1:
             st.markdown("Procesa tu historial y busca tus artistas más escuchados en TPB.")
             if st.button("🚀 Iniciar", type="primary"):
