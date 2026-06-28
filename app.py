@@ -701,20 +701,27 @@ def _fmt_duration(seconds) -> str:
         return "?"
 
 
+def _youtube_top_id(artist: str, track: str) -> str:
+    """Devuelve el id del primer resultado de YouTube para la canción, o ''."""
+    hits = _youtube_search(f"{artist} {track}", 1)
+    return hits[0].get("id", "") if hits else ""
+
+
+def _youtube_download_cmd(vid: str, dest: str, artist: str, track: str) -> list:
+    """Comando para descargar un id de YouTube como MP3 (para stream_script)."""
+    return [PYTHON, "-u", str(BASE_DIR / "scripts" / "youtube_dl.py"),
+            "download", vid, "--dest", dest, "--artist", artist, "--track", track]
+
+
 def _youtube_download_song(artist: str, track: str, dest: str) -> bool:
     """Busca la canción en YouTube (top 1) y la descarga como MP3 en `dest`,
     con metadata + portada (vía youtube_dl/tag_music). True si tuvo éxito."""
-    hits = _youtube_search(f"{artist} {track}", 1)
-    vid = hits[0].get("id", "") if hits else ""
+    vid = _youtube_top_id(artist, track)
     if not vid:
         return False
-    script = BASE_DIR / "scripts" / "youtube_dl.py"
     try:
-        r = subprocess.run(
-            [PYTHON, str(script), "download", vid, "--dest", dest,
-             "--artist", artist, "--track", track],
-            capture_output=True, text=True, timeout=300,
-        )
+        r = subprocess.run(_youtube_download_cmd(vid, dest, artist, track),
+                           capture_output=True, text=True, timeout=300)
         return r.returncode == 0
     except Exception:
         return False
@@ -2450,15 +2457,24 @@ def page_spotify():
                                           use_container_width=True, key="spy_batch")
                 if run_batch:
                     batch = missing[:lim]
-                    prog, ptxt, okc = st.progress(0.0), st.empty(), 0
+                    prog   = st.progress(0.0)
+                    status = st.empty()
+                    log    = st.empty()
+                    okc = 0
                     for i, c in enumerate(batch):
-                        ptxt.text(f"Descargando {i+1}/{len(batch)}: "
-                                  f"{c['artist']} — {c['track']}…")
-                        if _youtube_download_song(c["artist"], c["track"], yt_dest):
-                            okc += 1
+                        status.info(f"⬇️ {i+1}/{len(batch)} — {c['artist']} — {c['track']}")
+                        vid = _youtube_top_id(c["artist"], c["track"])
+                        if vid:
+                            ok = stream_script(
+                                _youtube_download_cmd(vid, yt_dest, c["artist"], c["track"]),
+                                log, status)
+                            okc += 1 if ok else 0
+                        else:
+                            log.warning(f"❌ No encontrada en YouTube: "
+                                        f"{c['artist']} — {c['track']}")
                         prog.progress((i + 1) / len(batch))
                     _scan_music_library.clear()
-                    ptxt.success(f"✅ Listo — {okc}/{len(batch)} descargadas.")
+                    status.success(f"✅ Listo — {okc}/{len(batch)} descargadas.")
                     st.rerun()
 
                 st.markdown("---")
@@ -2480,15 +2496,21 @@ def page_spotify():
                             if not downloaded:
                                 if st.button("🎬 Bajar MP3", key=f"spy_dl_{i}",
                                              use_container_width=True):
-                                    with st.spinner(f"Descargando {c['artist']} — "
-                                                    f"{c['track']}…"):
-                                        ok = _youtube_download_song(
-                                            c["artist"], c["track"], yt_dest)
-                                    if ok:
-                                        _scan_music_library.clear()
-                                        st.rerun()
+                                    status, log = st.empty(), st.empty()
+                                    status.info("🔎 Buscando en YouTube…")
+                                    vid = _youtube_top_id(c["artist"], c["track"])
+                                    if not vid:
+                                        status.error("❌ No encontrada en YouTube")
                                     else:
-                                        st.error("❌ No encontrada en YouTube")
+                                        ok = stream_script(
+                                            _youtube_download_cmd(
+                                                vid, yt_dest, c["artist"], c["track"]),
+                                            log, status)
+                                        if ok:
+                                            _scan_music_library.clear()
+                                            st.rerun()
+                                        else:
+                                            status.error("❌ Error al descargar")
 
         with tab1:
             st.markdown("Procesa tu historial y busca tus artistas más escuchados en TPB.")
