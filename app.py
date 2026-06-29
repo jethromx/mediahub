@@ -3826,97 +3826,15 @@ def page_peliculas():
     ]
 
     # ─── Tabs principales ─────────────────────────────────────────────────────
-    (tab_top, tab_buscar, tab_decadas, tab_culto, tab_yt, tab_rename_mov,
-     tab_resultados, tab_watchlist, tab_subs) = st.tabs([
+    tab_top, tab_buscar, tab_decadas, tab_culto = st.tabs([
         "📥 Top Descargas",
         "🔎 Buscar película",
         "📅 Explorar por época / género",
         "🎭 Cine de Culto",
-        "🎬 YouTube",
-        "✏️ Renombrar archivos",
-        "📂 Resultados guardados",
-        "⭐ Watchlist",
-        "💬 Subtítulos",
     ])
 
     movies_dir = BASE_DIR / "output" / "movies"
     movies_dir.mkdir(parents=True, exist_ok=True)
-
-    # ═══════════════════════════════════════════════════════════════════════════
-    # TAB YouTube — descargar video/película de YouTube como MP4
-    # ═══════════════════════════════════════════════════════════════════════════
-    with tab_yt:
-        st.markdown(
-            "Busca (o pega un enlace de) **YouTube** y descarga el video como **MP4** "
-            "a tu carpeta de películas."
-        )
-        st.caption("⚠️ Solo contenido de libre acceso. Las películas de pago/renta "
-                   "(YouTube Movies) o con DRM no se pueden descargar.")
-        yt_script = BASE_DIR / "scripts" / "youtube_dl.py"
-        if not _youtube_deps_ok():
-            st.warning("Faltan dependencias. Instala con `brew install yt-dlp ffmpeg` "
-                       "y recarga la página.")
-        else:
-            ytv_dest = st.text_input(
-                "📁 Carpeta destino",
-                value=cfg.get("movies_folder", str(Path.home() / "Downloads" / "Peliculas")),
-                key="ytv_dest")
-            quality_map = {"720p": 720, "1080p": 1080, "Máxima disponible": 0}
-            qc1, qc2 = st.columns([3, 1])
-            with qc1:
-                ytv_query = st.text_input(
-                    "Buscar en YouTube o pegar URL",
-                    placeholder="ej: nombre de la película  ·  o https://youtube.com/watch?v=…",
-                    key="ytv_query", label_visibility="collapsed")
-            with qc2:
-                ytv_quality = st.selectbox("Calidad", list(quality_map.keys()),
-                                           index=1, key="ytv_quality")
-
-            def _ytv_download(url):
-                if not ytv_dest or not Path(ytv_dest).parent.exists():
-                    st.error("Carpeta destino inválida.")
-                    return
-                status, log = st.empty(), st.empty()
-                status.info("⬇️ Descargando video… (puede tardar según tamaño)")
-                cmd = [PYTHON, "-u", str(yt_script), "video", url,
-                       "--dest", ytv_dest,
-                       "--max-height", str(quality_map[ytv_quality])]
-                ok = stream_script(cmd, log, status)
-                status.success("✅ ¡Video descargado!") if ok else \
-                    status.error("❌ Error (¿contenido con DRM/pago o no disponible?)")
-
-            is_url = ytv_query.strip().startswith("http")
-            cbtn1, cbtn2 = st.columns(2)
-            if is_url:
-                if cbtn1.button("⬇️ Descargar de este URL", type="primary",
-                                use_container_width=True, key="ytv_url_dl"):
-                    _ytv_download(ytv_query.strip())
-            else:
-                if cbtn1.button("🔍 Buscar", use_container_width=True,
-                                key="ytv_search", disabled=not ytv_query):
-                    st.session_state["ytv_results"] = _youtube_search(ytv_query, 8)
-
-            for j, r in enumerate(st.session_state.get("ytv_results", []) if not is_url else []):
-                vid = r.get("id", "")
-                with st.container(border=True):
-                    ri, rn, ra = st.columns([1, 4, 2])
-                    with ri:
-                        if vid:
-                            st.image(f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg",
-                                     use_container_width=True)
-                    with rn:
-                        st.markdown(f"**{r.get('title','')[:80]}**")
-                        st.caption(f"📺 {r.get('uploader','')}  ·  "
-                                   f"⏱️ {_fmt_duration(r.get('duration'))}")
-                        po = st.session_state.setdefault("_ytv_preview_open", set())
-                        if st.button("▶️ Ver", key=f"ytv_prev_{j}"):
-                            po.symmetric_difference_update({vid})
-                        if vid in po:
-                            st.video(f"https://www.youtube.com/watch?v={vid}")
-                    with ra:
-                        if st.button("⬇️ Descargar MP4", key=f"ytv_dl_{j}",
-                                     type="primary", use_container_width=True):
-                            _ytv_download(f"https://www.youtube.com/watch?v={vid}")
 
     # ═══════════════════════════════════════════════════════════════════════════
     # TAB 0 — Top Descargas (YTS)
@@ -4060,7 +3978,12 @@ def page_peliculas():
     # TAB 1 — Búsqueda directa
     # ═══════════════════════════════════════════════════════════════════════════
     with tab_buscar:
-        st.markdown("Busca cualquier película y encuentra sus torrents en **The Pirate Bay** con prioridad en **español latino**.")
+        st.info(
+            "**Fuente:** TMDB (ficha) + TPB · YTS · Knaben · SolidTorrents  ·  "
+            "**Qué busca:** torrents de la película con prioridad **español latino** "
+            "(filtra CAM/TS)  ·  **Salida:** abre el magnet / guarda el `.torrent`.  \n"
+            "¿No hay torrent? Abajo puedes bajarla de **YouTube** (MP4)."
+        )
 
         col_q, col_yr = st.columns([3, 1])
         with col_q:
@@ -4104,18 +4027,6 @@ def page_peliculas():
 
                 _render_movie_card(movie)
 
-                # Feature #2: Add to watchlist button
-                wl = _load_watchlist()
-                wl_ids = {w.get("id") for w in wl}
-                if movie.get("id") not in wl_ids:
-                    if st.button("⭐ Guardar en Watchlist", key="wl_add_buscar"):
-                        wl.append(movie)
-                        _save_watchlist(wl)
-                        st.success("Agregado a la Watchlist")
-                        st.rerun()
-                else:
-                    st.success("✅ Ya está en tu Watchlist")
-
                 st.markdown("---")
                 st.markdown("#### Torrents disponibles")
                 # Caché por película: sin esto cada rerun (guardar magnet,
@@ -4150,6 +4061,68 @@ def page_peliculas():
                     st.download_button("Exportar torrents a CSV", _cbuf.getvalue().encode(),
                                        f"{movie['title'][:30]}_torrents.csv", mime="text/csv",
                                        key="mov_csv_buscar")
+
+        # ── Integrado: descargar desde YouTube (MP4) ─────────────────────────
+        with st.expander("🎬 ¿No está en torrents? Búscala o pega un enlace de YouTube (MP4)"):
+            st.caption("Solo contenido de libre acceso (no YouTube Movies/DRM). "
+                       "Se guarda en tu carpeta de películas y queda en el Historial.")
+            if not _youtube_deps_ok():
+                st.warning("Faltan dependencias: `brew install yt-dlp ffmpeg`.")
+            else:
+                yt_script = BASE_DIR / "scripts" / "youtube_dl.py"
+                ytv_dest = st.text_input(
+                    "📁 Carpeta destino",
+                    value=cfg.get("movies_folder", str(Path.home() / "Downloads" / "Peliculas")),
+                    key="ytv_dest")
+                qmap = {"720p": 720, "1080p": 1080, "Máxima": 0}
+                qc1, qc2 = st.columns([3, 1])
+                with qc1:
+                    ytv_q = st.text_input(
+                        "Buscar en YouTube o pegar URL",
+                        placeholder="nombre de la película  ·  o https://youtube.com/watch?v=…",
+                        key="ytv_query", label_visibility="collapsed")
+                with qc2:
+                    ytv_quality = st.selectbox("Calidad", list(qmap.keys()), index=1,
+                                               key="ytv_quality")
+
+                def _ytv_dl(url):
+                    if not ytv_dest or not Path(ytv_dest).parent.exists():
+                        st.error("Carpeta destino inválida.")
+                        return
+                    status, log = st.empty(), st.empty()
+                    status.info("⬇️ Descargando video…")
+                    cmd = [PYTHON, "-u", str(yt_script), "video", url, "--dest", ytv_dest,
+                           "--max-height", str(qmap[ytv_quality])]
+                    if stream_script(cmd, log, status):
+                        _record_download("Película (YouTube)", 1, url[:60])
+                        status.success("✅ Descargado")
+                    else:
+                        status.error("❌ Error (¿DRM/pago o no disponible?)")
+
+                if ytv_q.strip().startswith("http"):
+                    if st.button("⬇️ Descargar de este URL", type="primary",
+                                 use_container_width=True, key="ytv_url_dl"):
+                        _ytv_dl(ytv_q.strip())
+                else:
+                    if st.button("🔍 Buscar en YouTube", use_container_width=True,
+                                 key="ytv_search", disabled=not ytv_q):
+                        st.session_state["ytv_results"] = _youtube_search(ytv_q, 8)
+                    for j, r in enumerate(st.session_state.get("ytv_results", [])):
+                        vid = r.get("id", "")
+                        with st.container(border=True):
+                            ri, rn, ra = st.columns([1, 4, 2])
+                            with ri:
+                                if vid:
+                                    st.image(f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg",
+                                             use_container_width=True)
+                            with rn:
+                                st.markdown(f"**{r.get('title','')[:80]}**")
+                                st.caption(f"📺 {r.get('uploader','')}  ·  "
+                                           f"⏱️ {_fmt_duration(r.get('duration'))}")
+                            with ra:
+                                if st.button("⬇️ MP4", key=f"ytv_dl_{j}", type="primary",
+                                             use_container_width=True):
+                                    _ytv_dl(f"https://www.youtube.com/watch?v={vid}")
 
     # ═══════════════════════════════════════════════════════════════════════════
     # TAB 2 — Explorar por épocas y géneros
@@ -4393,17 +4366,7 @@ def page_peliculas():
                                            if len(movie.get("overview", "")) > 180
                                            else movie.get("overview", ""))
                         with c2:
-                            wl = _load_watchlist()
-                            wl_ids = {w.get("id") for w in wl}
-                            if movie.get("id") not in wl_ids:
-                                if st.button("⭐", key=f"top_wl_{i}",
-                                             use_container_width=True,
-                                             help="Guardar en Watchlist"):
-                                    wl.append(movie)
-                                    _save_watchlist(wl)
-                                    st.rerun()
-                            else:
-                                st.markdown("✅", unsafe_allow_html=True)
+                            st.write("")
                         with c3:
                             show_top_t = st.button("🧲", key=f"top_t_{i}",
                                                    use_container_width=True,
@@ -4499,25 +4462,9 @@ def page_peliculas():
 
                 for i, movie in enumerate(cult_movies):
                     with st.container():
-                        c1, c2 = st.columns([4, 1])
-                        with c1:
-                            _render_movie_card(movie)
-                        with c2:
-                            wl = _load_watchlist()
-                            wl_ids = {w.get("id") for w in wl}
-                            if movie.get("id") not in wl_ids:
-                                if st.button("⭐ Watchlist", key=f"cult_wl_{i}",
-                                             use_container_width=True):
-                                    wl.append(movie)
-                                    _save_watchlist(wl)
-                                    st.success("Agregado")
-                                    st.rerun()
-                            else:
-                                st.success("✅ En WL")
-
-                            show_t = st.button("🧲 Torrents", key=f"cult_t_{i}",
-                                               use_container_width=True)
-
+                        _render_movie_card(movie)
+                        show_t = st.button("🧲 Torrents", key=f"cult_t_{i}",
+                                           use_container_width=True)
                         if show_t:
                             with st.spinner(f"Buscando torrents de «{movie['title']}»..."):
                                 cult_n = st.session_state.get("mov_n", 10)
@@ -4532,10 +4479,22 @@ def page_peliculas():
                             unsafe_allow_html=True,
                         )
 
-    # ═══════════════════════════════════════════════════════════════════════════
-    # TAB 4 — Renombrar archivos de película
-    # ═══════════════════════════════════════════════════════════════════════════
-    with tab_rename_mov:
+
+
+def page_rename():
+    _page_header("✏️", "Renombrar", "Organiza y renombra tu carpeta de películas")
+    cfg = load_config()
+    sys.path.insert(0, str(BASE_DIR / "scripts"))
+    from movies_export import tmdb_search
+
+    @st.cache_data(ttl=600, show_spinner=False)
+    def _tmdb_search_c(key, q, year=None):
+        return tmdb_search(key, q, year=year)
+
+    tmdb_key   = cfg.get("tmdb_api_key", "").strip()
+    movies_dir = BASE_DIR / "output" / "movies"
+    movies_dir.mkdir(parents=True, exist_ok=True)
+    with st.container():
         import re as _re_mov, shutil as _shutil_mov
 
         VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".mov", ".m4v", ".wmv", ".flv", ".ts", ".webm"}
@@ -4880,185 +4839,6 @@ def page_peliculas():
                     st.download_button("⬇ Exportar preview a CSV", _rbuf.getvalue().encode(),
                                        "organizar_peliculas.csv", mime="text/csv",
                                        key="mov_rename_csv")
-
-    # ═══════════════════════════════════════════════════════════════════════════
-    # TAB 5 — Resultados guardados
-    # ═══════════════════════════════════════════════════════════════════════════
-    with tab_resultados:
-        mag_path = movies_dir / "magnets_movies.txt"
-        rep_path = movies_dir / "movies_report.json"
-
-        col_m, col_r = st.columns(2)
-        with col_m:
-            if mag_path.exists():
-                content = mag_path.read_text(encoding="utf-8")
-                n_mag = content.count("magnet:")
-                st.metric("🔗 Magnet links guardados", n_mag)
-                with open(mag_path, "rb") as f:
-                    st.download_button("⬇ Descargar magnets_movies.txt",
-                                       f.read(), "magnets_movies.txt",
-                                       use_container_width=True)
-            else:
-                st.info("Aún no hay magnets guardados.")
-
-        with col_r:
-            if rep_path.exists():
-                with open(rep_path) as f:
-                    report = _json.load(f)
-                n_movies   = len(report)
-                n_with_tor = sum(1 for r in report if r.get("torrents"))
-                st.metric("🎬 Películas en reporte", n_movies)
-                st.metric("✅ Con torrents encontrados", n_with_tor)
-            else:
-                st.info("Sin reporte aún.")
-
-        if rep_path.exists():
-            st.markdown("---")
-            search_r = st.text_input("🔎 Filtrar por título", key="mov_rep_search")
-            with open(rep_path) as f:
-                report = _json.load(f)
-            filtered = [r for r in report
-                        if not search_r or search_r.lower() in r["movie"]["title"].lower()]
-
-            for entry in filtered[:60]:
-                m = entry["movie"]
-                torrents = entry.get("torrents", [])
-                best = torrents[0] if torrents else None
-                with st.container(border=True):
-                    c1, c2 = st.columns([4, 2])
-                    with c1:
-                        rating_stars = "⭐" * int(m["rating"] / 2)
-                        st.markdown(f"**{m['title']}** ({m['year']}) {rating_stars}")
-                        if best:
-                            st.caption(
-                                f"{best['lang_icon']}  ·  {best['q_label']}  ·  "
-                                f"{best['seed_icon']} {best['seeds']} seeds  ·  {best['size']}"
-                            )
-                        else:
-                            st.caption("Sin torrents registrados")
-                    with c2:
-                        if best:
-                            st.code(best["magnet"][:60] + "...", language="")
-
-    # ═══════════════════════════════════════════════════════════════════════════
-    # TAB 4 — Watchlist  (feature #2)
-    # ═══════════════════════════════════════════════════════════════════════════
-    with tab_watchlist:
-        wl = _load_watchlist()
-        if not wl:
-            st.info("Tu watchlist está vacía. Busca una película y pulsa '⭐ Guardar en Watchlist'.")
-        else:
-            st.markdown(f'<div class="mh-section-title">{len(wl)} películas guardadas</div>',
-                        unsafe_allow_html=True)
-            for i, m in enumerate(wl):
-                with st.container(border=True):
-                    c1, c2, c3 = st.columns([4, 2, 1])
-                    with c1:
-                        st.markdown(f"**{m['title']}** ({m.get('year','')})")
-                        st.caption(f"⭐ {m.get('rating','')}  ·  {m.get('votes',0):,} votos")
-                    with c2:
-                        if st.button("Buscar torrents", key=f"wl_tor_{i}",
-                                     use_container_width=True):
-                            st.session_state["wl_active"] = i
-                    with c3:
-                        if st.button("✕", key=f"wl_del_{i}", help="Eliminar de watchlist"):
-                            wl.pop(i)
-                            _save_watchlist(wl)
-                            st.rerun()
-
-                if st.session_state.get("wl_active") == i:
-                    with st.spinner("Buscando torrents..."):
-                        good_t, blocked_t = find_movie_torrents_combined(
-                            m["title"], m.get("year", ""),
-                            title_orig=m.get("title_orig"),
-                        )
-                    _render_torrents(good_t, blocked_t, m, movies_dir,
-                                     show_blocked=False, key_prefix=f"wl_{i}")
-
-    # ═══════════════════════════════════════════════════════════════════════════
-    # TAB 5 — Subtítulos  (feature #9)
-    # ═══════════════════════════════════════════════════════════════════════════
-    with tab_subs:
-        st.markdown(
-            "Busca subtítulos en español para cualquier película. "
-            "Los resultados enlazan directamente a las fuentes de descarga."
-        )
-        col_sq, col_sl = st.columns([3, 1])
-        with col_sq:
-            sub_query = st.text_input("Título de la película", placeholder="ej: The Matrix, Inception...",
-                                      key="sub_query")
-        with col_sl:
-            sub_lang = st.selectbox("Idioma", ["Español Latino", "Español España", "Ambos"], key="sub_lang")
-
-        if st.button("Buscar subtítulos", type="primary", use_container_width=True,
-                     disabled=not sub_query, key="sub_btn"):
-            lang_code = {"Español Latino": "lat", "Español España": "spa", "Ambos": "spa,lat"}[sub_lang]
-            q_enc    = _uparse_mod.quote(sub_query)
-            q_subdivx = _uparse_mod.quote(sub_query.replace(" ", "+"))
-
-            # OpenSubtitles REST search — requiere API key (⚙️ Configuración)
-            subs_found = []
-            os_api_key = cfg.get("opensubtitles_api_key", "").strip()
-            if os_api_key:
-                try:
-                    os_url = (f"https://api.opensubtitles.com/api/v1/subtitles"
-                              f"?query={q_enc}&languages=es&order_by=download_count&order_direction=desc")
-                    os_req = _ureq_mod.Request(
-                        os_url,
-                        headers={"User-Agent": "MediaHub/1.0", "Api-Key": os_api_key},
-                    )
-                    with _ureq_mod.urlopen(os_req, timeout=8) as r:
-                        os_data = json.loads(r.read().decode())
-                    for sub in os_data.get("data", [])[:15]:
-                        attr = sub.get("attributes", {})
-                        subs_found.append({
-                            "title":    attr.get("feature_details", {}).get("movie_name", sub_query),
-                            "year":     attr.get("feature_details", {}).get("year", ""),
-                            "language": attr.get("language", "es"),
-                            "release":  attr.get("release", ""),
-                            "downloads": attr.get("download_count", 0),
-                            "url":      f"https://www.opensubtitles.com/es/subtitles/{sub.get('id','')}"
-                        })
-                except Exception:
-                    pass
-            else:
-                st.caption("💡 Configura una API key de OpenSubtitles en ⚙️ Configuración "
-                           "para buscar directamente aquí. Mientras tanto usa las fuentes alternativas.")
-
-            if subs_found:
-                st.success(f"✅ {len(subs_found)} subtítulos encontrados en OpenSubtitles")
-                for s in subs_found:
-                    with st.container(border=True):
-                        c1, c2 = st.columns([4, 1])
-                        with c1:
-                            st.markdown(f"**{s['release'][:80] or s['title']}**")
-                            st.caption(f"Año: {s['year']} · Idioma: {s['language']} · "
-                                       f"Descargas: {s['downloads']:,}")
-                        with c2:
-                            st.link_button("Descargar", s["url"], use_container_width=True)
-            else:
-                st.info("No se encontraron resultados en OpenSubtitles. Prueba en las fuentes alternativas:")
-
-            st.markdown("**Fuentes alternativas:**")
-            col_s1, col_s2, col_s3 = st.columns(3)
-            with col_s1:
-                st.link_button(
-                    "Subdivx.com",
-                    f"https://www.subdivx.com/index.php?buscar={q_subdivx}&accion=5",
-                    use_container_width=True,
-                )
-            with col_s2:
-                st.link_button(
-                    "OpenSubtitles",
-                    f"https://www.opensubtitles.org/es/search/sublanguageid-spa/moviename-{q_enc}",
-                    use_container_width=True,
-                )
-            with col_s3:
-                st.link_button(
-                    "SubDL",
-                    f"https://subdl.com/search/{q_enc}",
-                    use_container_width=True,
-                )
 
 
 # ─── Helpers de renderizado ───────────────────────────────────────────────────
@@ -7221,7 +7001,8 @@ NAV_GROUPS = [
     },
     {
         "label": "🗂  BIBLIOTECA",
-        "pages": ["🔧 Fix Metadata", "🧹 Limpiar duplicados", "📊 Explorador"],
+        "pages": ["🔧 Fix Metadata", "🧹 Limpiar duplicados", "✏️ Renombrar",
+                  "📊 Explorador"],
     },
     {
         "label": "⚙  SISTEMA",
@@ -7242,6 +7023,7 @@ PAGE_MAP = {
     "🎮 ROMs":               page_roms,
     "🔧 Fix Metadata":       page_metadata,
     "🧹 Limpiar duplicados": page_phone,
+    "✏️ Renombrar":          page_rename,
     "📊 Explorador":         page_explorador,
     "⚙️ Configuración":      page_config,
     "🩺 Salud de fuentes":   page_health,
@@ -7262,6 +7044,7 @@ PAGE_HINTS = {
     "🎮 ROMs":               "Miyoo A30 · GBA · SNES · PS1",
     "🔧 Fix Metadata":       "Corrige tags ID3 de MP3s",
     "🧹 Limpiar duplicados": "Elimina MP3s repetidos",
+    "✏️ Renombrar":          "Renombra y organiza películas",
     "📊 Explorador":         "Espacio por carpeta",
     "⚙️ Configuración":      "API keys y rutas",
     "🩺 Salud de fuentes":   "Estado de las APIs",
