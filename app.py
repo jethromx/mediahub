@@ -1897,62 +1897,90 @@ def page_ebooks():
         return "".join(c if (c.isalnum() or c in keep) else "_" for c in name)[:80].strip()
 
     def _libgen_search(q, n=10, lang_es=False, fmt=None):
-        """Search Library Genesis. Returns list of book dicts with direct download links."""
+        """Busca en Library Genesis (mirrors vivos: libgen.li y similares).
+        Devuelve dicts con enlace de descarga directa (página /ads.php?md5=)."""
         import re
-        params = {"req": q, "res": min(n, 25), "phrase": 1,
-                  "column": "def", "lg_topic": "libgen", "open": 0, "view": "simple"}
-        if lang_es:
-            params["language"] = "Spanish"
-        mirrors = ["https://libgen.is", "https://libgen.rs", "https://libgen.st"]
+        # Los mirrors clásicos (.is/.rs/.st) están caídos; .li es el que funciona.
+        mirrors = ["https://libgen.li", "https://libgen.gs", "https://libgen.vg"]
         strip_tags = lambda s: re.sub(r'<[^>]+>', '', s).strip()
         for mirror in mirrors:
             try:
-                url = f"{mirror}/search.php?" + _uparse.urlencode(params)
+                url = f"{mirror}/index.php?" + _uparse.urlencode({"req": q})
                 req = _ureq.Request(url, headers={"User-Agent": "Mozilla/5.0 (compatible)"})
                 with _ureq.urlopen(req, timeout=15) as r:
                     html = r.read().decode("utf-8", errors="ignore")
                 books = []
-                rows = re.findall(r'<tr[^>]*valign=["\']?top["\']?[^>]*>(.*?)</tr>', html, re.DOTALL | re.I)
-                for row in rows:
+                for row in re.findall(r'<tr[^>]*>(.*?)</tr>', html, re.DOTALL | re.I):
+                    if "md5" not in row.lower():
+                        continue
                     cells = re.findall(r'<td[^>]*>(.*?)</td>', row, re.DOTALL | re.I)
                     if len(cells) < 9:
                         continue
-                    id_ = strip_tags(cells[0])
-                    if not id_.isdigit():
+                    # Título: texto visible del enlace a edition.php (más limpio);
+                    # si no, el <b>. El atributo title= trae <br> y rompe el parseo.
+                    am = re.search(r'href="edition\.php[^"]*">(.*?)</a>',
+                                   cells[0], re.DOTALL | re.I)
+                    if am:
+                        title = strip_tags(am.group(1)).strip()[:120]
+                    else:
+                        bm = re.search(r'<b>(.*?)</b>', cells[0], re.DOTALL | re.I)
+                        raw = strip_tags(bm.group(1)) if bm else strip_tags(cells[0])
+                        title = re.sub(r'\s+\d+$', '', raw).strip()[:120]
+                    author   = strip_tags(cells[1])[:80]
+                    year     = strip_tags(cells[3])
+                    language = strip_tags(cells[4])
+                    size     = strip_tags(cells[6])
+                    ext      = strip_tags(cells[7]).lower()
+                    m   = re.search(r'md5=([a-fA-F0-9]{32})', cells[8], re.I)
+                    md5 = m.group(1).upper() if m else ""
+                    if not title or not md5:
                         continue
-                    author = strip_tags(cells[1])[:80]
-                    title_m = re.search(r'<a[^>]+>(.*?)</a>', cells[2], re.DOTALL | re.I)
-                    title = strip_tags(title_m.group(1) if title_m else cells[2])[:120]
-                    publisher = strip_tags(cells[3])[:60]
-                    year = strip_tags(cells[4])
-                    language = strip_tags(cells[6])
-                    size = strip_tags(cells[7])
-                    ext = strip_tags(cells[8]).lower()
-                    md5 = ""
-                    for c in cells[9:]:
-                        m = re.search(r'[?&]md5=([a-fA-F0-9]{32})', c, re.I)
-                        if m:
-                            md5 = m.group(1).upper()
-                            break
-                    if not md5:
-                        m = re.search(r'md5=([a-fA-F0-9]{32})', cells[2], re.I)
-                        if m:
-                            md5 = m.group(1).upper()
-                    if not title:
+                    if lang_es and "spanish" not in language.lower() \
+                            and "español" not in language.lower():
                         continue
                     if fmt and fmt != "Todos" and ext != fmt.lower():
                         continue
                     books.append({
                         "title": title, "author": author, "year": year,
-                        "language": language, "size": size,
-                        "ext": ext or "?", "md5": md5,
-                        "dl_url": f"http://library.lol/main/{md5}" if md5 else "",
+                        "language": language, "size": size, "ext": ext or "?",
+                        "md5": md5, "source": "LibGen",
+                        "dl_url": f"{mirror}/ads.php?md5={md5}",
                     })
                 if books:
                     return books[:n]
             except Exception:
                 continue
         return []
+
+    def _gutendex_search(q, n=10, lang_es=False):
+        """Project Gutenberg (Gutendex) — dominio público, descarga directa
+        EPUB/MOBI. Muy fiable para clásicos."""
+        try:
+            params = {"search": q}
+            if lang_es:
+                params["languages"] = "es"
+            url = "https://gutendex.com/books?" + _uparse.urlencode(params)
+            with _ureq.urlopen(_ureq.Request(url, headers={"User-Agent": "Mozilla/5.0"}),
+                               timeout=12) as r:
+                data = _json.loads(r.read())
+            out = []
+            for b in data.get("results", [])[:n]:
+                fmts = b.get("formats", {}) or {}
+                dl = (fmts.get("application/epub+zip")
+                      or fmts.get("application/x-mobipocket-ebook")
+                      or fmts.get("application/pdf") or "")
+                ext = ("epub" if "epub" in dl else "mobi" if "mobi" in dl
+                       else "pdf" if "pdf" in dl else "?")
+                out.append({
+                    "title": (b.get("title", "") or "")[:120],
+                    "author": ", ".join(a.get("name", "") for a in b.get("authors", []))[:80],
+                    "year": "", "language": ", ".join(b.get("languages", [])),
+                    "size": "", "ext": ext, "md5": "", "source": "Gutenberg",
+                    "dl_url": dl,
+                })
+            return [b for b in out if b["dl_url"]]
+        except Exception:
+            return []
 
     # Leyenda seeds (se muestra en varias pestañas)
     SEED_LEGEND = (
@@ -1997,9 +2025,10 @@ def page_ebooks():
     # ── Tab 2: búsqueda directa ───────────────────────────────────────────────
     with tab2:
         st.markdown(
-            "Busca libros en **The Pirate Bay** (torrents) y/o **Library Genesis** "
-            "(descarga directa — EPUB, PDF, MOBI). Library Genesis tiene cobertura "
-            "mucho mayor, especialmente en español."
+            "Busca en **Library Genesis** y **Project Gutenberg** (descarga directa — "
+            "EPUB/PDF/MOBI) y en **The Pirate Bay** (torrents). LibGen tiene la mayor "
+            "cobertura; Gutenberg cubre clásicos/dominio público con EPUB y MOBI listos "
+            "para Kindle."
         )
         st.caption(SEED_LEGEND)
         st.markdown("---")
@@ -2015,9 +2044,10 @@ def page_ebooks():
         with col_src:
             fuente_eb = st.selectbox(
                 "Fuente",
-                ["Library Genesis 📚", "The Pirate Bay 🏴", "Ambas fuentes 🔍"],
+                ["Todas 🔍", "Library Genesis 📚", "Project Gutenberg 📖",
+                 "The Pirate Bay 🏴"],
                 key="eb_fuente",
-                help="Library Genesis: descarga directa (EPUB/PDF/MOBI). TPB: torrent.",
+                help="LibGen y Gutenberg: descarga directa. TPB: torrent.",
             )
 
         col_lang, col_fmt, col_cat = st.columns(3)
@@ -2047,23 +2077,34 @@ def page_ebooks():
         buscar_eb = st.button("🔍 Buscar", type="primary",
                               use_container_width=True, disabled=not query_eb)
 
+        # Deep-link a Anna's Archive (el mayor agregador) — fallback en navegador
+        if query_eb:
+            st.link_button(
+                "🔎 Buscar también en Anna's Archive (navegador)",
+                f"https://annas-archive.org/search?q={_uparse.quote(query_eb)}",
+                help="El mayor agregador de ebooks (LibGen + Z-Library + más). "
+                     "Se abre en tu navegador.",
+            )
+
         if buscar_eb and query_eb:
-            usar_libgen = fuente_eb in ("Library Genesis 📚", "Ambas fuentes 🔍")
-            usar_tpb    = fuente_eb in ("The Pirate Bay 🏴", "Ambas fuentes 🔍")
+            todas = fuente_eb.startswith("Todas")
+            usar_libgen    = todas or fuente_eb.startswith("Library Genesis")
+            usar_gutenberg = todas or fuente_eb.startswith("Project Gutenberg")
+            usar_tpb       = todas or fuente_eb.startswith("The Pirate Bay")
 
             # Consulta efectiva para TPB: añadir "español" si procede
-            tpb_query = query_eb
-            if solo_es and usar_tpb:
-                tpb_query = f"{query_eb} español"
+            tpb_query = f"{query_eb} español" if (solo_es and usar_tpb) else query_eb
 
             res_libgen, res_tpb = [], []
 
             with st.spinner("Buscando…"):
                 if usar_libgen:
-                    res_libgen = _libgen_search(
+                    res_libgen += _libgen_search(
                         query_eb, n=n_eb, lang_es=solo_es,
                         fmt=fmt_eb if fmt_eb != "Todos" else None,
                     )
+                if usar_gutenberg:
+                    res_libgen += _gutendex_search(query_eb, n=n_eb, lang_es=solo_es)
                 if usar_tpb:
                     res_tpb = _eb_search(tpb_query, cat_map_eb[cat_eb], n_eb)
 
@@ -2087,9 +2128,10 @@ def page_ebooks():
                 st.success(f"✅ {total} resultados para **{eb_state['query']}**"
                            + (" (en español)" if eb_state["solo_es"] else ""))
 
-            # ── Resultados Library Genesis ─────────────────────────────────
+            # ── Resultados de descarga directa (LibGen + Gutenberg) ────────
             if res_libgen:
-                st.markdown(f"#### 📚 Library Genesis — {len(res_libgen)} resultados")
+                st.markdown(f"#### 📚 Descarga directa — {len(res_libgen)} resultados "
+                            "(Library Genesis · Project Gutenberg)")
                 for i, b in enumerate(res_libgen):
                     ext_badge = {
                         "epub": "🟢 EPUB", "pdf": "🔵 PDF",
@@ -2098,6 +2140,7 @@ def page_ebooks():
                     }.get(b["ext"], f"📄 {b['ext'].upper()}")
 
                     lang_flag = "🇪🇸 " if "spanish" in b["language"].lower() or "español" in b["language"].lower() else ""
+                    src_badge = f"📖 {b.get('source', '')}" if b.get("source") else ""
 
                     with st.container(border=True):
                         col_info, col_btns = st.columns([5, 2])
@@ -2106,17 +2149,19 @@ def page_ebooks():
                             meta_parts = []
                             if b["author"]: meta_parts.append(f"✍️ {b['author']}")
                             if b["year"]:   meta_parts.append(b["year"])
-                            meta_parts.append(f"{lang_flag}{b['language']}")
-                            meta_parts.append(f"💾 {b['size']}")
+                            if b["language"]: meta_parts.append(f"{lang_flag}{b['language']}")
+                            if b["size"]:   meta_parts.append(f"💾 {b['size']}")
                             meta_parts.append(ext_badge)
+                            if src_badge:   meta_parts.append(src_badge)
                             st.caption("  ·  ".join(meta_parts))
                         with col_btns:
                             if b["dl_url"]:
-                                st.link_button(
-                                    "⬇ Descargar", b["dl_url"],
-                                    use_container_width=True,
-                                    help="Abre library.lol — haz clic en 'GET' para descargar el archivo directamente.",
-                                )
+                                _help = ("Descarga directa del EPUB/MOBI."
+                                         if b.get("source") == "Gutenberg"
+                                         else "Abre la página de LibGen — haz clic en "
+                                              "'GET' para descargar el archivo.")
+                                st.link_button("⬇ Descargar", b["dl_url"],
+                                               use_container_width=True, help=_help)
                             else:
                                 st.caption("Sin enlace disponible")
 
