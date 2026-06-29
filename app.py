@@ -366,16 +366,29 @@ def _qbit_list(cfg: dict):
         return None
 
 
+def _open_magnet(mag: str, savepath: str = "") -> None:
+    """Envía el magnet a qBittorrent (si está configurado/activado) o lo abre en
+    el cliente del SO."""
+    cfg = load_config()
+    sent = False
+    if cfg.get("use_qbit") and cfg.get("qbit_url"):
+        sent = _qbit_add_magnet(cfg, mag, savepath)
+    if not sent:
+        subprocess.Popen(["open", mag])   # fallback al handler del SO
+
+
+def _open_and_log(mag: str, name: str, kind: str = "Torrent") -> None:
+    """Abre un magnet genérico (búsqueda directa/rápida) y lo deja en el
+    historial de descargas (B2)."""
+    _open_magnet(mag)
+    _record_download(kind, 1, (name or "")[:80])
+
+
 def _download_and_record(artist: str, track: str, result: dict) -> None:
     """Envía el magnet a qBittorrent (si está configurado y activado) o lo abre
     en el cliente del SO; en ambos casos registra la petición en el ledger."""
     mag = _build_magnet(result.get("info_hash", ""), result.get("name", ""))
-    cfg = load_config()
-    sent = False
-    if cfg.get("use_qbit") and cfg.get("qbit_url"):
-        sent = _qbit_add_magnet(cfg, mag, cfg.get("music_folder", ""))
-    if not sent:
-        subprocess.Popen(["open", mag])   # fallback al handler del SO
+    _open_magnet(mag, load_config().get("music_folder", ""))
     _ledger_record_request(artist, track, result)
 
 
@@ -1142,15 +1155,19 @@ def page_inicio():
     if quick_btn and quick_q:
         cat_map_q = {"Música (MP3)": 101, "Música (FLAC)": 100, "Películas": 200, "Ebooks": 601}
         with st.spinner(f"Buscando «{quick_q}»..."):
-            results_q = _tpb_search_cached(quick_q, cat_map_q[quick_cat], 6)
-        if not results_q:
+            st.session_state["home_q_results"] = list(
+                _tpb_search_cached(quick_q, cat_map_q[quick_cat], 6))
+
+    hq_results = st.session_state.get("home_q_results")
+    if hq_results is not None:
+        if not hq_results:
             st.warning("Sin resultados.")
         else:
-            for r in results_q[:6]:
+            for i, r in enumerate(hq_results[:6]):
                 seeds = int(r.get("seeders", 0))
                 sc = "🟢" if seeds >= 20 else ("🟡" if seeds >= 5 else "🔴")
-                ih = r.get("info_hash","")
-                name = _uparse_mod.quote(r.get("name",""))
+                ih = r.get("info_hash", "")
+                name = _uparse_mod.quote(r.get("name", ""))
                 tr = "tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce"
                 mag = f"magnet:?xt=urn:btih:{ih}&dn={name}&{tr}"
                 with st.container(border=True):
@@ -1158,7 +1175,10 @@ def page_inicio():
                     with c1:
                         st.caption(f"{sc} {r.get('name','')[:90]}  ·  {seeds} seeds")
                     with c2:
-                        _magnet_button("🧲 Abrir", mag)
+                        if st.button("🧲 Abrir", key=f"hq_dl_{i}",
+                                     use_container_width=True):
+                            _open_and_log(mag, r.get("name", ""))
+                            st.toast("Magnet abierto y registrado en Historial")
 
     # ── Accesos rápidos ───────────────────────────────────────────────────────
     st.markdown('<div class="mh-section-title">Acceso rápido</div>',
@@ -1695,7 +1715,10 @@ def page_musica():
                                 else:
                                     st.caption("Sin hash")
                             with col_mag:
-                                _magnet_button("🧲 Magnet", mag)
+                                if st.button("🧲 Abrir", key=f"mag_{i}",
+                                             use_container_width=True):
+                                    _open_and_log(mag, name)
+                                    st.toast("Magnet abierto y registrado en Historial")
 
             # CSV export
             import io as _io, csv as _csv
