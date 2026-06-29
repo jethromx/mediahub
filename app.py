@@ -2306,26 +2306,38 @@ def page_ebooks():
 
 
 def page_metadata():
-    _page_header("🔧", "Fix Metadata", "Corrige tags ID3 de tus MP3s automáticamente")
+    _page_header("🔧", "Fix Metadata", "Completa tags y portadas de tu música")
     cfg = load_config()
 
     col1, col2 = st.columns([2, 1])
     with col1:
-        folder = st.text_input("📁 Carpeta con MP3s", value=cfg["music_folder"])
+        folder = st.text_input("📁 Carpeta de música", value=cfg["music_folder"])
     with col2:
-        mode = st.radio("Modo", ["Normal", "Dry Run (sin cambios)", "Force (sobreescribir todo)"])
-
-    mode_flag = {"Normal": [], "Dry Run (sin cambios)": ["--dry-run"], "Force (sobreescribir todo)": ["--force"]}[mode]
+        engine = st.selectbox(
+            "Motor",
+            ["Shazam (rápido · MP3/FLAC/M4A · portada)", "MusicBrainz (clásico · MP3)"],
+            key="meta_engine",
+            help="Shazam: rápido, multi-formato, embebe portada y marca el ledger. "
+                 "MusicBrainz: el motor clásico (solo MP3).",
+        )
+    is_shazam = engine.startswith("Shazam")
+    mode = st.radio("Modo",
+                    ["Normal", "Dry Run (sin cambios)"]
+                    + ([] if is_shazam else ["Force (sobreescribir todo)"]),
+                    horizontal=True)
+    mode_flag = {"Normal": [], "Dry Run (sin cambios)": ["--dry-run"],
+                 "Force (sobreescribir todo)": ["--force"]}[mode]
 
     # Info previa
     folder_path = Path(folder)
     if folder_path.exists():
-        mp3_count = len(list(folder_path.rglob("*.mp3")))
-        eta_min   = round(mp3_count * 1.2 / 60)
+        exts = ("*.mp3", "*.flac", "*.m4a") if is_shazam else ("*.mp3",)
+        n_files = sum(len(list(folder_path.rglob(e))) for e in exts)
+        eta_min = round(n_files * 1.2 / 60)
         col_a, col_b, col_c = st.columns(3)
-        col_a.metric("MP3s encontrados", mp3_count)
+        col_a.metric("Archivos encontrados", n_files)
         col_b.metric("Tiempo estimado", f"~{eta_min} min")
-        col_c.metric("Fuentes", "MusicBrainz + Last.fm")
+        col_c.metric("Fuente", "Shazam" if is_shazam else "MusicBrainz + Last.fm")
     else:
         st.warning("La carpeta no existe. Verifica la ruta.")
 
@@ -2337,11 +2349,18 @@ def page_metadata():
     ])
 
     with tab1:
-        st.markdown(
-            "El script analiza cada MP3, detecta qué tags faltan "
-            "(título, artista, álbum, año, género, **portada**) y los completa "
-            "consultando **MusicBrainz** y **Last.fm**."
-        )
+        if is_shazam:
+            st.markdown(
+                "Analiza cada archivo (MP3/FLAC/M4A), detecta tags faltantes o sin "
+                "**portada** y los completa con **Shazam** (artista, título, álbum, "
+                "año, género + carátula). También marca el ledger de descargas."
+            )
+        else:
+            st.markdown(
+                "Analiza cada MP3, detecta qué tags faltan "
+                "(título, artista, álbum, año, género, **portada**) y los completa "
+                "consultando **MusicBrainz** y **Last.fm**."
+            )
 
         col_run, col_info = st.columns([1, 2])
         with col_run:
@@ -2356,61 +2375,83 @@ def page_metadata():
                 cfg["music_folder"] = folder
                 save_config(cfg)
 
-                script = BASE_DIR / "scripts" / "fix_metadata.py"
-                cmd    = [PYTHON, "-u", str(script), folder] + mode_flag
+                if is_shazam:
+                    script = BASE_DIR / "scripts" / "tag_music.py"
+                    extra_env = {}
+                else:
+                    script = BASE_DIR / "scripts" / "fix_metadata.py"
+                    extra_env = {"LASTFM_API_KEY": cfg["lastfm_api_key"]}
+                cmd = [PYTHON, "-u", str(script), folder] + mode_flag
 
                 status = st.empty()
                 log    = st.empty()
-                status.info("⏳ Analizando MP3s — esto puede tardar bastante...")
-                ok = stream_script(cmd, log, status,
-                                   extra_env={"LASTFM_API_KEY": cfg["lastfm_api_key"]})
+                status.info("⏳ Analizando — esto puede tardar…")
+                ok = stream_script(cmd, log, status, extra_env=extra_env)
                 if ok:
                     status.success("✅ ¡Análisis completado!")
+                    _scan_music_library.clear()
                     if mode == "Normal":
-                        report_p = folder_path / "_metadata_report.json"
-                        if report_p.exists():
-                            rpt = json.loads(report_p.read_text())
-                            _record_download("Fix Metadata",
-                                             rpt.get("summary", {}).get("updated", 0),
-                                             folder[:60])
+                        if is_shazam:
+                            rp = BASE_DIR / "output" / "_tag_report.json"
+                            n = json.loads(rp.read_text()).get("fixed", 0) if rp.exists() else 0
+                        else:
+                            rp = folder_path / "_metadata_report.json"
+                            n = (json.loads(rp.read_text()).get("summary", {})
+                                 .get("updated", 0)) if rp.exists() else 0
+                        _record_download("Fix Metadata", n, folder[:60])
                 else:
                     status.error("❌ Terminó con errores")
 
     with tab2:
-        report_path = folder_path / "_metadata_report.json"
-        if report_path.exists():
-            with open(report_path) as f:
-                report = json.load(f)
-
-            summary = report.get("summary", {})
-            total   = sum(summary.values())
-
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("✓ Completos",    summary.get("ok", 0))
-            col2.metric("✅ Actualizados", summary.get("updated", 0))
-            col3.metric("— Sin cambios",  summary.get("no_changes", 0))
-            col4.metric("✗ Errores",      summary.get("errors", 0))
-
-            st.caption(f"Fecha: {report.get('date', '—')} | Total: {total} archivos")
-
-            files = report.get("files", [])
-            updated = [f for f in files if f.get("status") == "updated"]
-            if updated:
-                st.markdown(f"#### ✅ Archivos actualizados ({len(updated)})")
-                for f in updated[:50]:
-                    name    = Path(f["file"]).name
-                    changes = " · ".join(f.get("changes", []))
-                    st.markdown(f"- **{name[:50]}** — {changes[:80]}")
-                if len(updated) > 50:
-                    st.caption(f"... y {len(updated)-50} más")
-
-            errors = [f for f in files if f.get("status") == "error"]
-            if errors:
-                with st.expander(f"✗ Errores ({len(errors)})"):
-                    for f in errors:
-                        st.markdown(f"- `{Path(f['file']).name}` — {f.get('error')}")
+        if is_shazam:
+            rp = BASE_DIR / "output" / "_tag_report.json"
+            if rp.exists():
+                report = json.loads(rp.read_text())
+                c1, c2, c3 = st.columns(3)
+                c1.metric("✅ Arreglados", report.get("fixed", 0))
+                c2.metric("— Ya completos", report.get("skipped", 0))
+                c3.metric("✗ Sin match/error", report.get("failed", 0))
+                files = report.get("files", [])
+                if files:
+                    st.markdown(f"#### ✅ Archivos actualizados ({len(files)})")
+                    for f in files[:50]:
+                        cov = "🖼️" if f.get("cover") else ""
+                        st.markdown(f"- **{f.get('artist','')}** — {f.get('title','')} "
+                                    f"`[{f.get('album','?')}]` {cov}")
+                    if len(files) > 50:
+                        st.caption(f"... y {len(files)-50} más")
+            else:
+                st.info("Aún no hay reporte de Shazam. Ejecuta el análisis primero.")
         else:
-            st.info("Aún no hay reporte. Ejecuta el análisis primero.")
+            report_path = folder_path / "_metadata_report.json"
+            if report_path.exists():
+                with open(report_path) as f:
+                    report = json.load(f)
+                summary = report.get("summary", {})
+                total   = sum(summary.values())
+                col1, col2, col3, col4 = st.columns(4)
+                col1.metric("✓ Completos",    summary.get("ok", 0))
+                col2.metric("✅ Actualizados", summary.get("updated", 0))
+                col3.metric("— Sin cambios",  summary.get("no_changes", 0))
+                col4.metric("✗ Errores",      summary.get("errors", 0))
+                st.caption(f"Fecha: {report.get('date', '—')} | Total: {total} archivos")
+                files = report.get("files", [])
+                updated = [f for f in files if f.get("status") == "updated"]
+                if updated:
+                    st.markdown(f"#### ✅ Archivos actualizados ({len(updated)})")
+                    for f in updated[:50]:
+                        name    = Path(f["file"]).name
+                        changes = " · ".join(f.get("changes", []))
+                        st.markdown(f"- **{name[:50]}** — {changes[:80]}")
+                    if len(updated) > 50:
+                        st.caption(f"... y {len(updated)-50} más")
+                errors = [f for f in files if f.get("status") == "error"]
+                if errors:
+                    with st.expander(f"✗ Errores ({len(errors)})"):
+                        for f in errors:
+                            st.markdown(f"- `{Path(f['file']).name}` — {f.get('error')}")
+            else:
+                st.info("Aún no hay reporte. Ejecuta el análisis primero.")
 
     # Feature #4 — Preview antes/después
     with tab_preview:
@@ -2903,13 +2944,14 @@ def page_phone():
         st.warning("⚠️ La carpeta no existe. Verifica la ruta en ⚙️ Configuración.")
 
     # ── Tabs ──────────────────────────────────────────────────────────────────
-    tab_run, tab_dups, tab_export, tab_meta, tab_m3u = st.tabs([
+    tab_run, tab_dups, tab_export, tab_m3u = st.tabs([
         "🧹 Limpiar duplicados",
         "🔁 Lista de duplicados",
         "📦 Exportar a carpeta",
-        "🏷️ Metadata & Portadas",
         "🎼 Playlist .m3u",
     ])
+    st.caption("¿Arreglar tags y portadas? Ahora está unificado en **🔧 Fix Metadata** "
+               "(con motor Shazam o MusicBrainz).")
 
     script = BASE_DIR / "scripts" / "dedup_music.py"
 
@@ -2936,61 +2978,6 @@ def page_phone():
                                        file_name="playlist.m3u8", mime="audio/x-mpegurl")
                 else:
                     status.error("❌ Error al generar la playlist")
-
-    # ════════════════════════════════════════════════════════════════════════
-    # Tab Metadata — arreglar tags y portada de la biblioteca (Componente 2)
-    # ════════════════════════════════════════════════════════════════════════
-    with tab_meta:
-        st.markdown("""
-        <div style="background:rgba(120,80,255,0.08);border:1px solid rgba(120,80,255,0.2);
-                    border-radius:12px;padding:16px 20px;margin-bottom:16px;">
-            <div style="color:#c4b5fd;font-weight:700;margin-bottom:6px;">¿Qué hace?</div>
-            <div style="color:#8888b0;font-size:0.9rem;line-height:1.6;">
-                Escanea tu carpeta de música y, en los archivos con
-                <strong style="color:#e2e2f0;">tags incompletos o sin portada</strong>,
-                escribe artista/título/álbum/año/género y embebe la carátula usando
-                <strong style="color:#e2e2f0;">Shazam</strong>. También marca como
-                descargadas las canciones que pediste desde mediahub. No mueve ni borra
-                archivos. Formatos: MP3, FLAC, M4A.
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-
-        tag_script = BASE_DIR / "scripts" / "tag_music.py"
-        col_md1, col_md2 = st.columns(2)
-        with col_md1:
-            if st.button("🔍 Analizar (sin escribir)", use_container_width=True,
-                         key="meta_dry"):
-                if not source_path.exists():
-                    st.error("La carpeta no existe.")
-                else:
-                    cfg["music_folder"] = source_folder
-                    save_config(cfg)
-                    status, log = st.empty(), st.empty()
-                    status.info("🔍 Analizando metadata...")
-                    cmd = [PYTHON, "-u", str(tag_script), source_folder, "--dry-run"]
-                    ok = stream_script(cmd, log, status)
-                    status.success("✅ Análisis listo.") if ok else status.error("❌ Error")
-        with col_md2:
-            confirm_meta = st.checkbox("✅ Confirmo escribir tags/portadas en mis archivos",
-                                       key="meta_confirm")
-            if st.button("🏷️ Arreglar metadata", type="primary",
-                         use_container_width=True, disabled=not confirm_meta,
-                         key="meta_run"):
-                if not source_path.exists():
-                    st.error("La carpeta no existe.")
-                else:
-                    cfg["music_folder"] = source_folder
-                    save_config(cfg)
-                    status, log = st.empty(), st.empty()
-                    status.warning("🏷️ Escribiendo tags y portadas...")
-                    cmd = [PYTHON, "-u", str(tag_script), source_folder]
-                    ok = stream_script(cmd, log, status)
-                    if ok:
-                        status.success("✅ ¡Metadata arreglada!")
-                        _scan_music_library.clear()
-                    else:
-                        status.error("❌ Terminó con errores")
 
     # ════════════════════════════════════════════════════════════════════════
     # Tab 1 — Borrar duplicados en lugar
