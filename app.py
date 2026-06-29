@@ -1227,84 +1227,18 @@ def page_musica():
 
     st.markdown("---")
 
-    tab1, tab2, tab_trend, tab_yt, tab3 = st.tabs([
-        "▶ Ejecutar búsqueda", "🔎 Buscar artista / canción",
-        "🔥 Tendencias", "🎬 YouTube → MP3", "📂 Resultados anteriores",
+    tab1, tab2, tab_trend, tab3 = st.tabs([
+        "📻 Top Last.fm → torrents", "🔎 Buscar artista / canción",
+        "🔥 Tendencias", "📂 Resultados anteriores",
     ])
-
-    # ── Tab YouTube → MP3 ─────────────────────────────────────────────────────
-    with tab_yt:
-        st.markdown(
-            "Busca una canción en **YouTube** y descárgala como **MP3** directo a tu "
-            "biblioteca, con metadata y portada aplicadas automáticamente (vía Shazam)."
-        )
-        yt_script = BASE_DIR / "scripts" / "youtube_dl.py"
-        if not _youtube_deps_ok():
-            st.warning(
-                "Faltan dependencias. Instálalas en una terminal con:\n\n"
-                "`brew install yt-dlp ffmpeg`\n\n"
-                "Luego recarga esta página."
-            )
-        else:
-            yt_dest = st.text_input("📁 Carpeta destino", value=cfg.get("music_folder", ""),
-                                    key="yt_dest")
-            yc1, yc2 = st.columns([4, 1])
-            with yc1:
-                yt_query = st.text_input("Buscar canción en YouTube",
-                                         placeholder="ej: Soda Stereo De Música Ligera",
-                                         key="yt_query", label_visibility="collapsed")
-            with yc2:
-                yt_btn = st.button("🔍 Buscar", use_container_width=True,
-                                   key="yt_search_btn", disabled=not yt_query)
-
-            if yt_btn and yt_query:
-                st.session_state["yt_results"] = _youtube_search(yt_query, 8)
-
-            yt_results = st.session_state.get("yt_results", [])
-            if yt_btn and not yt_results:
-                st.info("Sin resultados. Prueba con otra búsqueda.")
-
-            for j, r in enumerate(yt_results):
-                vid = r.get("id", "")
-                with st.container(border=True):
-                    rc_img, rc_info, rc_act = st.columns([1, 4, 2])
-                    with rc_img:
-                        if vid:
-                            st.image(f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg",
-                                     use_container_width=True)
-                    with rc_info:
-                        st.markdown(f"**{r.get('title','')[:80]}**")
-                        st.caption(f"📺 {r.get('uploader','')}  ·  "
-                                   f"⏱️ {_fmt_duration(r.get('duration'))}")
-                        po = st.session_state.setdefault("_yt_preview_open", set())
-                        if st.button("▶️ Ver", key=f"yt_prev_{j}"):
-                            po.symmetric_difference_update({vid})
-                        if vid in po:
-                            st.video(f"https://www.youtube.com/watch?v={vid}")
-                    with rc_act:
-                        if st.button("⬇️ Descargar MP3", key=f"yt_dl_{j}",
-                                     type="primary", use_container_width=True):
-                            if not yt_dest or not Path(yt_dest).parent.exists():
-                                st.error("Carpeta destino inválida.")
-                            else:
-                                status, log = st.empty(), st.empty()
-                                status.info("⬇️ Descargando y convirtiendo a MP3…")
-                                cmd = [PYTHON, "-u", str(yt_script), "download",
-                                       f"https://www.youtube.com/watch?v={vid}",
-                                       "--dest", yt_dest]
-                                ok = stream_script(cmd, log, status)
-                                if ok:
-                                    status.success("✅ ¡Descargada como MP3!")
-                                    _scan_music_library.clear()
-                                else:
-                                    status.error("❌ Error al descargar")
 
     # ── Tab Tendencias: top de canciones de Apple Music + descarga ────────────
     with tab_trend:
-        st.markdown(
-            "Las **canciones más populares** del momento (chart de Apple Music). "
-            "Busca el torrent de cada una en todas las fuentes (con álbum de Shazam) "
-            "y marca las que ya tienes en tu biblioteca."
+        st.info(
+            "**Fuente:** chart de Apple Music (elige país y género)  ·  "
+            "**Qué busca:** el mejor torrent de cada canción en las 4 fuentes "
+            "(Knaben, SolidTorrents, BitSearch, TPB), usando el álbum real de Shazam  ·  "
+            "**Salida:** abre el magnet en tu cliente torrent y marca las que ya tienes."
         )
         tcol1, tcol2, tcol3 = st.columns([2, 2, 1])
         with tcol1:
@@ -1418,10 +1352,16 @@ def page_musica():
                                 st.rerun()
 
     with tab1:
-        st.markdown(
-            "Descarga el top de canciones de **Last.fm**, busca cada una en "
-            "The Pirate Bay y genera ficheros `.torrent` para uTorrent."
+        st.info(
+            "**Fuente:** tu top de canciones de **Last.fm** por género  ·  "
+            "**Qué busca:** cada canción en **The Pirate Bay**  ·  "
+            "**Salida:** ficheros `.torrent` en `output/torrents` + un registro que "
+            "verás en **📂 Resultados anteriores**.  \n"
+            "Requiere tu **API key de Last.fm** (⚙️ Configuración)."
         )
+        if not cfg.get("lastfm_api_key", "").strip():
+            st.warning("⚠️ Falta tu API key de Last.fm — configúrala en ⚙️ Configuración "
+                       "antes de ejecutar.")
 
         # Feature #13: formato de audio
         fmt_col1, fmt_col2 = st.columns([2, 1])
@@ -1779,6 +1719,31 @@ def page_musica():
         torr = out / "torrents"
         log_path = out / "lastfm_search_log.json"
 
+        # ── Descargas recientes (ledger — todas las fuentes) ───────────────
+        ledger = _ledger_load()
+        if ledger:
+            entries = sorted(ledger.values(),
+                             key=lambda e: e.get("requested_at", ""), reverse=True)
+            n_done = sum(1 for e in entries if e.get("status") == "completed")
+            st.markdown("#### ⬇️ Descargas recientes")
+            st.caption(f"{len(entries)} registradas · {n_done} completadas · "
+                       "incluye torrents (Tendencias/Spotify) y YouTube")
+            for e in entries[:20]:
+                icon = "✅" if e.get("status") == "completed" else "⬇️"
+                src  = e.get("source", "?")
+                when = e.get("completed_at") or e.get("requested_at", "")
+                with st.container(border=True):
+                    cda, cdb = st.columns([5, 2])
+                    cda.markdown(f"{icon} **{e.get('artist','')}** — {e.get('track','')}")
+                    cda.caption(f"📦 {src} · {e.get('torrent_name','')[:55]}")
+                    cdb.caption(f"{'✅ Descargada' if e.get('status')=='completed' else '⬇️ Pedida'}"
+                                f"\n\n{when}")
+            if len(entries) > 20:
+                st.caption(f"… y {len(entries) - 20} más.")
+            st.markdown("---")
+
+        # ── Búsqueda Last.fm (flujo 'Top Last.fm → torrents') ──────────────
+        st.markdown("#### 📻 Última búsqueda de Last.fm")
         # ── Métricas ──────────────────────────────────────────────────────
         search_log_data = None
         if log_path.exists():
@@ -7114,7 +7079,7 @@ hr {
 # ─────────────────────────────────────────────────────────────────────────────
 
 def page_youtube():
-    _page_header("🎬", "YouTube", "Pega un enlace y descárgalo como MP3 o MP4")
+    _page_header("🎬", "YouTube", "Busca o pega un enlace y descárgalo como MP3 o MP4")
     cfg = load_config()
 
     if not _youtube_deps_ok():
@@ -7122,21 +7087,18 @@ def page_youtube():
                    "y recarga la página.")
         return
 
-    yt_script = BASE_DIR / "scripts" / "youtube_dl.py"
+    yt_script   = BASE_DIR / "scripts" / "youtube_dl.py"
+    quality_map = {"720p": 720, "1080p": 1080, "Máxima disponible": 0}
 
-    url  = st.text_input("URL de YouTube",
-                         placeholder="https://www.youtube.com/watch?v=…",
-                         key="ytu_url")
+    # ── Controles compartidos (aplican a Buscar y a Pegar URL) ────────────────
     tipo = st.selectbox("¿Qué quieres descargar?",
                         ["🎵 Música (MP3)", "🎬 Película / Video (MP4)"],
                         key="ytu_tipo")
     is_music = tipo.startswith("🎵")
-
-    quality_map = {"720p": 720, "1080p": 1080, "Máxima disponible": 0}
     if is_music:
         dest = st.text_input("📁 Carpeta destino", value=cfg.get("music_folder", ""),
                              key="ytu_dest_m")
-        st.caption("Se descarga como **MP3 192k** y se le aplican metadata + portada (Shazam).")
+        st.caption("Se descarga como **MP3 192k** + metadata y portada (Shazam).")
         quality = "1080p"
     else:
         dest = st.text_input("📁 Carpeta destino", value=cfg.get("movies_folder", ""),
@@ -7146,31 +7108,74 @@ def page_youtube():
         st.caption("Se descarga como **MP4 (H.264)**. El contenido de pago/DRM "
                    "(YouTube Movies) no se puede descargar.")
 
-    valid = url.strip().startswith("http")
-    if valid:
-        with st.expander("▶️ Previsualizar"):
-            st.video(url.strip())
-
-    if st.button("⬇️ Descargar", type="primary", disabled=not valid,
-                 use_container_width=True, key="ytu_dl"):
+    def _do_download(target_url: str, label: str = ""):
         if not dest or not Path(dest).parent.exists():
             st.error("Carpeta destino inválida.")
+            return
+        status, log = st.empty(), st.empty()
+        if is_music:
+            status.info(f"⬇️ Descargando música → MP3… {label}")
+            cmd = [PYTHON, "-u", str(yt_script), "download", target_url, "--dest", dest]
         else:
-            status, log = st.empty(), st.empty()
-            if is_music:
-                status.info("⬇️ Descargando música y convirtiendo a MP3…")
-                cmd = [PYTHON, "-u", str(yt_script), "download", url.strip(),
-                       "--dest", dest]
-            else:
-                status.info("⬇️ Descargando video… (puede tardar según tamaño)")
-                cmd = [PYTHON, "-u", str(yt_script), "video", url.strip(),
-                       "--dest", dest, "--max-height", str(quality_map[quality])]
-            ok = stream_script(cmd, log, status)
-            if ok:
-                status.success("✅ ¡Descargado!")
-                _scan_music_library.clear()
-            else:
-                status.error("❌ Error (¿URL inválido o contenido con DRM/pago?)")
+            status.info(f"⬇️ Descargando video → MP4… {label}")
+            cmd = [PYTHON, "-u", str(yt_script), "video", target_url,
+                   "--dest", dest, "--max-height", str(quality_map[quality])]
+        ok = stream_script(cmd, log, status)
+        if ok:
+            status.success("✅ ¡Descargado!")
+            _scan_music_library.clear()
+        else:
+            status.error("❌ Error (¿URL inválido o contenido con DRM/pago?)")
+
+    modo = st.radio("Modo", ["🔎 Buscar en YouTube", "🔗 Pegar URL"],
+                    horizontal=True, key="ytu_mode")
+    st.markdown("---")
+
+    # ── Modo Pegar URL ────────────────────────────────────────────────────────
+    if modo.startswith("🔗"):
+        url = st.text_input("URL de YouTube",
+                            placeholder="https://www.youtube.com/watch?v=…", key="ytu_url")
+        valid = url.strip().startswith("http")
+        if valid:
+            with st.expander("▶️ Previsualizar"):
+                st.video(url.strip())
+        if st.button("⬇️ Descargar", type="primary", disabled=not valid,
+                     use_container_width=True, key="ytu_dl"):
+            _do_download(url.strip())
+
+    # ── Modo Buscar ───────────────────────────────────────────────────────────
+    else:
+        yc1, yc2 = st.columns([4, 1])
+        with yc1:
+            q = st.text_input("Buscar en YouTube",
+                              placeholder="ej: Soda Stereo De Música Ligera",
+                              key="ytu_q", label_visibility="collapsed")
+        with yc2:
+            if st.button("🔍 Buscar", use_container_width=True, key="ytu_sbtn",
+                         disabled=not q):
+                st.session_state["ytu_results"] = _youtube_search(q, 8)
+        for j, r in enumerate(st.session_state.get("ytu_results", [])):
+            vid = r.get("id", "")
+            with st.container(border=True):
+                ri, rinfo, ract = st.columns([1, 4, 2])
+                with ri:
+                    if vid:
+                        st.image(f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg",
+                                 use_container_width=True)
+                with rinfo:
+                    st.markdown(f"**{r.get('title','')[:80]}**")
+                    st.caption(f"📺 {r.get('uploader','')}  ·  "
+                               f"⏱️ {_fmt_duration(r.get('duration'))}")
+                    po = st.session_state.setdefault("_ytu_prev", set())
+                    if st.button("▶️ Ver", key=f"ytu_prev_{j}"):
+                        po.symmetric_difference_update({vid})
+                    if vid in po:
+                        st.video(f"https://www.youtube.com/watch?v={vid}")
+                with ract:
+                    if st.button("⬇️ MP3" if is_music else "⬇️ MP4", type="primary",
+                                 use_container_width=True, key=f"ytu_dl_{j}"):
+                        _do_download(f"https://www.youtube.com/watch?v={vid}",
+                                     r.get("title", "")[:30])
 
 
 def page_torrents():
