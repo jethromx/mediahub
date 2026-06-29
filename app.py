@@ -3826,11 +3826,10 @@ def page_peliculas():
     ]
 
     # ─── Tabs principales ─────────────────────────────────────────────────────
-    tab_top, tab_buscar, tab_decadas, tab_culto = st.tabs([
+    tab_top, tab_buscar, tab_decadas = st.tabs([
         "📥 Top Descargas",
         "🔎 Buscar película",
-        "📅 Explorar por época / género",
-        "🎭 Cine de Culto",
+        "🔭 Explorar / Descubrir",
     ])
 
     movies_dir = BASE_DIR / "output" / "movies"
@@ -4128,7 +4127,24 @@ def page_peliculas():
     # TAB 2 — Explorar por épocas y géneros
     # ═══════════════════════════════════════════════════════════════════════════
     with tab_decadas:
-        st.markdown("Descubre las **películas más populares** de cada época.")
+        st.markdown("Descubre películas por **época**, **género** o **colección de culto**. "
+                    "Los filtros se combinan (ej. *Top de culto + 80s + Terror*).")
+
+        # Colecciones de culto (with_keywords de TMDB) → combo unificado
+        # 9715 cult film · 9816 cult classic · 10349 B-movie · 212372 midnight movie
+        CULT_COLLECTIONS = {
+            "🏆 Top de culto":      ("9715|9816|10349|212372", None),
+            "🎃 Terror de culto":   ("9715|9816|10349|212372", "terror"),
+            "🌙 Midnight / B-movie": ("212372|10349", None),
+            "🤖 Sci-fi de culto":   ("9715|9816", "ciencia_ficcion"),
+        }
+
+        coleccion = st.selectbox(
+            "🎬 Colección", ["Normal"] + list(CULT_COLLECTIONS),
+            key="mov_coleccion",
+            help="«Normal» usa época+género. Las de culto filtran por keywords "
+                 "de TMDB (cult film, B-movie, midnight…).",
+        )
 
         col_d, col_g = st.columns([2, 2])
         with col_d:
@@ -4165,6 +4181,13 @@ def page_peliculas():
         }
         tmdb_sort = sort_map.get(orden_label, "popularity.desc")
 
+        @st.cache_data(ttl=3600, show_spinner=False)
+        def _tmdb_cult_discover_c(key, y_gte, y_lte, genre_id, limit, sort_by, keywords):
+            ep = {"with_keywords": keywords, "vote_average.gte": "5.5",
+                  "popularity.lte": "60", "vote_count.gte": "100"}
+            return tmdb_discover(key, y_gte, y_lte, genre_id=genre_id, limit=limit,
+                                 sort_by=sort_by, extra_params=ep)
+
         buscar_epoca = st.button("🚀 Explorar", type="primary",
                                  use_container_width=True, key="mov_explore_btn")
 
@@ -4173,21 +4196,27 @@ def page_peliculas():
             if genero_sel != "Todos los géneros":
                 genre_key = genero_sel.lower().replace(" ", "_")
 
-            pages_needed = max(1, (limite + 19) // 20)   # cuántas páginas TMDB necesita
-            with st.spinner(f"Consultando TMDB ({pages_needed} página{'s' if pages_needed > 1 else ''})..."):
-                if decada_label == "Tendencias semana":
+            decade_map = {
+                "70s (1970–1979)":  (1970, 1979),
+                "80s (1980–1989)":  (1980, 1989),
+                "90s (1990–1999)":  (1990, 1999),
+                "2000s (2000–2009)":(2000, 2009),
+                "2010s (2010–2019)":(2010, 2019),
+                "2020s (2020–hoy)": (2020, 2030),
+            }
+            with st.spinner("Consultando TMDB..."):
+                if coleccion in CULT_COLLECTIONS:
+                    keywords, forced_genre = CULT_COLLECTIONS[coleccion]
+                    gkey = forced_genre or genre_key
+                    gid  = GENRE_IDS.get(gkey) if gkey else None
+                    y_gte, y_lte = decade_map.get(decada_label, (None, None))
+                    movies = _tmdb_cult_discover_c(tmdb_key, y_gte, y_lte, gid,
+                                                   limite, tmdb_sort, keywords)
+                elif decada_label == "Tendencias semana":
                     movies = _tmdb_trending_c(tmdb_key, limit=limite)
                 elif decada_label == "Populares ahora":
                     movies = _tmdb_popular_c(tmdb_key, limit=limite)
                 else:
-                    decade_map = {
-                        "70s (1970–1979)":  (1970, 1979),
-                        "80s (1980–1989)":  (1980, 1989),
-                        "90s (1990–1999)":  (1990, 1999),
-                        "2000s (2000–2009)":(2000, 2009),
-                        "2010s (2010–2019)":(2010, 2019),
-                        "2020s (2020–hoy)": (2020, 2030),
-                    }
                     y_gte, y_lte = decade_map[decada_label]
                     genre_id = GENRE_IDS.get(genre_key) if genre_key else None
                     movies = _tmdb_discover_c(tmdb_key, y_gte, y_lte,
@@ -4247,238 +4276,6 @@ def page_peliculas():
                     if good_t is not None or blocked_t is not None:
                         _render_torrents(good_t or [], blocked_t or [], movie, movies_dir,
                                          show_blocked=False, key_prefix=key)
-
-    # ═══════════════════════════════════════════════════════════════════════════
-    # TAB 3 — Cine de Culto
-    # ═══════════════════════════════════════════════════════════════════════════
-    with tab_culto:
-        import json as _cult_json
-
-        # ── Cached call para el top global de culto ───────────────────────────
-        @st.cache_data(ttl=3600, show_spinner=False)
-        def _tmdb_top_cult_c(key, sort_by, min_votes, limit):
-            # Keywords: 9715=cult film | 9816=cult classic | 10349=B-movie | 212372=midnight movie
-            ep = {
-                "with_keywords":   "9715|9816|10349|212372",
-                "vote_count.gte":  str(min_votes),
-                "popularity.lte":  "60",   # excluye blockbusters; Blade Runner ~15, The Matrix ~180
-                "vote_average.gte": "5.5",  # descarta títulos muy malos sin audiencia real
-            }
-            return tmdb_discover(key, sort_by=sort_by, limit=limit, extra_params=ep)
-
-        # ── Modo de vista ─────────────────────────────────────────────────────
-        cult_mode = st.radio(
-            "Vista",
-            ["🏆 Top Películas de Culto", "🎭 Explorar por Subgénero"],
-            horizontal=True,
-            key="cult_mode",
-            label_visibility="collapsed",
-        )
-
-        st.markdown("---")
-
-        # ══════════════════════════════════════════════════════════════════════
-        # MODO TOP CULTO
-        # ══════════════════════════════════════════════════════════════════════
-        if cult_mode == "🏆 Top Películas de Culto":
-            st.markdown(
-                "Las películas clasificadas como **cult film** en TMDB, ordenadas por "
-                "calificación de usuarios. Incluye todas las épocas y géneros."
-            )
-
-            col_ts, col_tv, col_tl = st.columns([2, 2, 1])
-            with col_ts:
-                top_sort_label = st.selectbox(
-                    "Ordenar por",
-                    ["⭐ Calificación", "🔥 Popularidad", "📅 Más recientes"],
-                    key="top_cult_sort",
-                )
-            with col_tv:
-                top_min_votes = st.select_slider(
-                    "Votos mínimos",
-                    options=[100, 200, 500, 1000, 2000, 5000],
-                    value=500,
-                    key="top_cult_votes",
-                    help="Filtra películas poco conocidas",
-                )
-            with col_tl:
-                top_limit = st.number_input("Cantidad", 10, 200, 50, 10, key="top_cult_limit")
-
-            top_sort_map = {
-                "⭐ Calificación":  "vote_average.desc",
-                "🔥 Popularidad":   "popularity.desc",
-                "📅 Más recientes": "primary_release_date.desc",
-            }
-            top_sort = top_sort_map.get(top_sort_label, "vote_average.desc")
-
-            if st.button("🏆 Cargar Top Culto", type="primary",
-                         use_container_width=True, key="top_cult_btn"):
-                with st.spinner("Consultando TMDB — keyword 'cult film'..."):
-                    top_movies = _tmdb_top_cult_c(
-                        tmdb_key, top_sort, top_min_votes, top_limit
-                    )
-                if top_sort == "popularity.desc":
-                    top_movies.sort(key=lambda m: m.get("popularity", 0), reverse=True)
-                elif top_sort == "primary_release_date.desc":
-                    top_movies.sort(key=lambda m: str(m.get("year", "0")), reverse=True)
-                st.session_state["top_cult_results"] = top_movies
-
-            top_movies = st.session_state.get("top_cult_results", [])
-            if top_movies:
-                st.success(f"✅ {len(top_movies)} películas de culto")
-
-                # Tabla resumen en la parte superior
-                import pandas as _pd_top
-                df_top = _pd_top.DataFrame([{
-                    "#":       i + 1,
-                    "título":  m["title"],
-                    "año":     m.get("year", ""),
-                    "⭐ nota": m.get("rating", ""),
-                    "géneros": m.get("genres", ""),
-                } for i, m in enumerate(top_movies)])
-                st.dataframe(
-                    df_top, use_container_width=True, hide_index=True,
-                    column_config={
-                        "#":       st.column_config.NumberColumn("#", width="small"),
-                        "⭐ nota": st.column_config.NumberColumn("⭐ Nota", format="%.1f"),
-                    },
-                )
-
-                st.markdown("---")
-                st.markdown("#### Detalles y torrents")
-
-                for i, movie in enumerate(top_movies):
-                    rating = movie.get("rating", 0)
-                    year   = movie.get("year", "")
-                    # Medalla para el top 3
-                    medal = {0: "🥇", 1: "🥈", 2: "🥉"}.get(i, f"**#{i+1}**")
-                    with st.container(border=True):
-                        c1, c2, c3 = st.columns([5, 1, 1])
-                        with c1:
-                            st.markdown(
-                                f'{medal} **{movie["title"]}** ({year})'
-                                f'&nbsp;&nbsp;<span style="color:#fbbf24;font-size:0.9rem;">'
-                                f'⭐ {rating}</span>',
-                                unsafe_allow_html=True,
-                            )
-                            if movie.get("overview"):
-                                st.caption(movie["overview"][:180] + "…"
-                                           if len(movie.get("overview", "")) > 180
-                                           else movie.get("overview", ""))
-                        with c2:
-                            st.write("")
-                        with c3:
-                            show_top_t = st.button("🧲", key=f"top_t_{i}",
-                                                   use_container_width=True,
-                                                   help="Buscar torrents")
-                        if show_top_t:
-                            with st.spinner(f"Buscando «{movie['title']}»..."):
-                                g_t, b_t = find_movie_torrents_combined(
-                                    movie["title"], movie["year"], n=10,
-                                    title_orig=movie.get("title_orig"),
-                                )
-                            _render_torrents(g_t, b_t, movie, movies_dir,
-                                             show_blocked=False,
-                                             key_prefix=f"top_{i}")
-
-        # ══════════════════════════════════════════════════════════════════════
-        # MODO SUBGÉNERO
-        # ══════════════════════════════════════════════════════════════════════
-        else:
-            st.markdown(
-                "Explora subgéneros de **cine de culto** curados. "
-                "Selecciona uno y busca torrents."
-            )
-
-        # ── Selector de subgénero (grid de cards) ─────────────────────────────
-        if cult_mode == "🎭 Explorar por Subgénero":
-            cols_per_row = 4
-            sg_names = [sg["name"] for sg in CULT_SUBGENRES]
-            selected_cult = st.session_state.get("cult_selected", sg_names[0])
-
-            rows = [CULT_SUBGENRES[i:i+cols_per_row] for i in range(0, len(CULT_SUBGENRES), cols_per_row)]
-            for row in rows:
-                rcols = st.columns(len(row))
-                for col, sg in zip(rcols, row):
-                    with col:
-                        is_active = sg["name"] == selected_cult
-                        bg = "rgba(120,80,255,0.25)" if is_active else "rgba(19,19,46,0.8)"
-                        border = "rgba(120,80,255,0.7)" if is_active else "rgba(60,60,100,0.4)"
-                        st.markdown(
-                            f'<div style="background:{bg};border:1.5px solid {border};'
-                            f'border-radius:12px;padding:14px 12px;text-align:center;'
-                            f'margin-bottom:4px;min-height:80px;">'
-                            f'<div style="font-size:1.6rem;">{sg["icon"]}</div>'
-                            f'<div style="font-size:0.8rem;font-weight:600;color:#e2e2f0;'
-                            f'margin-top:4px;">{sg["name"]}</div>'
-                            f'<div style="font-size:0.68rem;color:#8888b0;margin-top:3px;">'
-                            f'{sg["desc"]}</div>'
-                            f'</div>',
-                            unsafe_allow_html=True,
-                        )
-                        if st.button("Seleccionar", key=f"cult_sel_{sg['name']}",
-                                     use_container_width=True,
-                                     type="primary" if is_active else "secondary"):
-                            st.session_state["cult_selected"] = sg["name"]
-                            st.session_state.pop("cult_results", None)
-                            st.rerun()
-
-            st.markdown("---")
-            sg_data = next((s for s in CULT_SUBGENRES if s["name"] == selected_cult), CULT_SUBGENRES[0])
-
-            col_l, col_n = st.columns([3, 1])
-            with col_l:
-                cult_limit = st.slider("Número de películas", 10, 80, 30, 10, key="cult_limit")
-            with col_n:
-                cult_sort_label = st.selectbox(
-                    "Ordenar por",
-                    ["⭐ Calificación", "🔥 Popularidad", "📅 Más recientes"],
-                    key="cult_sort",
-                )
-
-            cult_sort_map = {
-                "⭐ Calificación":  "vote_average.desc",
-                "🔥 Popularidad":   "popularity.desc",
-                "📅 Más recientes": "primary_release_date.desc",
-            }
-            cult_sort = cult_sort_map.get(cult_sort_label, "vote_average.desc")
-
-            if st.button(f"🎬 Explorar {sg_data['icon']} {sg_data['name']}",
-                         type="primary", use_container_width=True, key="cult_explore"):
-                ep_str = _cult_json.dumps(sg_data["extra"])
-                with st.spinner(f"Cargando {sg_data['name']}..."):
-                    movies_cult = _tmdb_cult_c(tmdb_key, ep_str, limit=cult_limit)
-                if cult_sort == "popularity.desc":
-                    movies_cult.sort(key=lambda m: m.get("popularity", 0), reverse=True)
-                elif cult_sort == "primary_release_date.desc":
-                    movies_cult.sort(key=lambda m: str(m.get("year", "0")), reverse=True)
-                st.session_state["cult_results"] = movies_cult
-                st.session_state["cult_subgenre"] = sg_data["name"]
-
-            cult_movies = st.session_state.get("cult_results", [])
-            if cult_movies:
-                active_sg = st.session_state.get("cult_subgenre", selected_cult)
-                st.success(f"✅ {len(cult_movies)} películas · {active_sg}")
-
-                for i, movie in enumerate(cult_movies):
-                    with st.container():
-                        _render_movie_card(movie)
-                        show_t = st.button("🧲 Torrents", key=f"cult_t_{i}",
-                                           use_container_width=True)
-                        if show_t:
-                            with st.spinner(f"Buscando torrents de «{movie['title']}»..."):
-                                cult_n = st.session_state.get("mov_n", 10)
-                                good_t, blocked_t = find_movie_torrents_combined(
-                                    movie["title"], movie["year"], n=cult_n,
-                                    title_orig=movie.get("title_orig"),
-                                )
-                            _render_torrents(good_t, blocked_t, movie, movies_dir,
-                                             show_blocked=False, key_prefix=f"cult_{i}")
-                        st.markdown(
-                            '<hr style="border:none;border-top:1px solid rgba(60,60,100,0.3);margin:8px 0;">',
-                            unsafe_allow_html=True,
-                        )
-
 
 
 def page_rename():
